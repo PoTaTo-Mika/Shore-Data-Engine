@@ -1,0 +1,6 @@
+# Audio processing dependencies
+soundfile>=0.12.1
+librosa>=0.10.0
+numpy<=1.26.4
+requests>=2.25.1
+
