@@ -8,10 +8,19 @@ import os
 import re
 from get_name import get_name
 
+# 配置logging，使其能在终端显示INFO级别的日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler()  # 输出到终端
+    ]
+)
+
 # 蜻蜓FM采用的API接口是一个重定向的动态网页
 # 目前这个脚本只能爬一个album，后续待更新到全自动爬取
 
-PROGRAM_URL = "https://i.qtfm.cn/capi/channel/437133/programs/8d8418798bb30f33bfbd4c505c635c1c?curpage=1&pagesize=1&order=asc"
+PROGRAM_URL = "https://i.qtfm.cn/capi/channel/121170/programs/9a4ff4c800f208f564579039441b5062?curpage=5&pagesize=100&order=asc"
 
 # 然后我们要从这个url当中获取到album_id
 
@@ -22,7 +31,7 @@ ALBUM_ID = re.search(r'channel/(\d+)', PROGRAM_URL).group(1)
 SECRECT_KEY = "7l8CZ)SgZgM_bkrw"
 
 # 下载文件夹
-DOWNLOAD_FOLDER = '../data/' + str(get_name(ALBUM_ID))
+DOWNLOAD_FOLDER = './data/' + str(get_name(ALBUM_ID))
 if not os.path.exists(DOWNLOAD_FOLDER):
     os.makedirs(DOWNLOAD_FOLDER)
 
