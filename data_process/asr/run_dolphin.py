@@ -6,6 +6,16 @@ import logging
 from tqdm import tqdm
 from pathlib import Path
 
+# 配置logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),  # 输出到控制台
+        logging.FileHandler('dolphin_transcription.log', encoding='utf-8')  # 输出到文件
+    ]
+)
+
 def process_audio(audio_path, model):
     waveform = dolphin.load_audio(audio_path)
     result = model(waveform)
@@ -16,12 +26,20 @@ def process_audio(audio_path, model):
 def process_into_list(folder):
     
     audio_extensions = ['.mp3', '.wav', '.m4a', '.ogg', '.flac', '.aac', '.wma', '.webm', '.opus']
-    transcription_pairs = {}
+    
+    folder_path = Path(folder)
+    json_output_path = folder_path / "transcription.json"
+    
+    # 如果JSON文件已存在，加载现有数据
+    if json_output_path.exists():
+        with open(json_output_path, "r", encoding='utf-8') as f:
+            transcription_pairs = json.load(f)
+        logging.info(f"Loaded existing transcription data with {len(transcription_pairs)} entries")
+    else:
+        transcription_pairs = {}
 
     model = dolphin.load_model("base", "../../checkpoints/dolphin", "cuda")
 
-    folder_path = Path(folder)
-    
     # 先收集所有音频文件
     audio_files = []
     for audio_file in folder_path.rglob('*'):
@@ -33,29 +51,31 @@ def process_into_list(folder):
     # 使用tqdm显示进度
     for audio_file in tqdm(audio_files, desc="Processing audio files", unit="file"):
         try:
+            # 获得绝对路径
+            audio_path = str(audio_file.absolute())
+            
+            # 检查是否已经处理过这个文件
+            if audio_path in transcription_pairs:
+                logging.info(f"Skipping already processed file: {audio_file}")
+                continue
+                
             logging.info(f"Processing {audio_file}")
             # 这边用函数是为了方便兼容后面走tensorrt的格式
             transcription_text = process_audio(audio_file, model)
-
-            # 获得绝对路径
-            audio_path = str(audio_file.absolute())
             transcription_pairs[audio_path] = transcription_text
 
-            logging.info(f"Finish Transcription: {transcription_text}")
+            # 立即保存到JSON文件
+            with open(json_output_path, "w", encoding='utf-8') as f:
+                json.dump(transcription_pairs, f, ensure_ascii=False, indent=2)
+
+            logging.info(f"Finish Transcription and Saved: {transcription_text}")
         
         except Exception as e:
             logging.error(f"Overcome Error: {e} with {audio_file}")
             # 然后我们就不添加进去了
-    
-    json_output_path = folder_path / "transcription.json"
-
-    # 保存json
-    with open(json_output_path, "w", encoding='utf-8') as f:
-        json.dump(transcription_pairs, f, ensure_ascii=False, indent=2)
 
     from tools.calculate_time import calculate_time
 
-    folder_path = Path(folder)
     total_duration = calculate_time(folder_path)
 
     logging.info(f"Transcription saved to {json_output_path}")

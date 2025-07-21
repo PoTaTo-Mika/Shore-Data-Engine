@@ -16,7 +16,7 @@ def calculate_time(folder_path):
     # 检查文件夹是否存在
     if not folder.exists():
         print(f"文件夹 {folder_path} 不存在")
-        return audio_files
+        return 0  # 返回0而不是audio_files列表
     
     # 遍历文件夹和所有子文件夹
     for file_path in folder.rglob('*'):
