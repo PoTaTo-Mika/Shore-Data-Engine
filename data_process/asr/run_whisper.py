@@ -14,25 +14,34 @@ def process_into_list(folder):
     audio_extensions = ['.mp3', '.wav', '.m4a', '.ogg', '.flac', '.aac', '.wma', '.webm', '.opus']
     transcription_pairs = {}
 
-    model = wsp.load_model('../checkpoints/whisper-large-v3')
+    model = wsp.load_model('../../checkpoints/whisper-large-v3')
 
     folder_path = Path(folder)
+    
+    # 先收集所有音频文件
+    audio_files = []
     for audio_file in folder_path.rglob('*'):
         if audio_file.is_file() and audio_file.suffix.lower() in audio_extensions:
-            try:
-                logging.info(f"Processing {audio_file}")
-                # 这边用函数是为了方便兼容后面走tensorrt的格式
-                transcription_text = process_audio(audio_file, model)
+            audio_files.append(audio_file)
+    
+    logging.info(f"Found {len(audio_files)} audio files to process")
+    
+    # 使用tqdm显示进度
+    for audio_file in tqdm(audio_files, desc="Processing audio files", unit="file"):
+        try:
+            logging.info(f"Processing {audio_file}")
+            # 这边用函数是为了方便兼容后面走tensorrt的格式
+            transcription_text = process_audio(audio_file, model)
 
-                # 获得绝对路径
-                audio_path = str(audio_file.absolute())
-                transcription_pairs[audio_path] = transcription_text
+            # 获得绝对路径
+            audio_path = str(audio_file.absolute())
+            transcription_pairs[audio_path] = transcription_text
 
-                logging.info(f"Finish Transcription: {transcription_text}")
-            
-            except Exception as e:
-                logging(f"Overcome Error: {e} with {audio_file}")
-                # 然后我们就不添加进去了
+            logging.info(f"Finish Transcription: {transcription_text}")
+        
+        except Exception as e:
+            logging.error(f"Overcome Error: {e} with {audio_file}")
+            # 然后我们就不添加进去了
     
     json_output_path = folder_path / "transcription.json"
 
