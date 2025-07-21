@@ -10,3 +10,4 @@ requests>=2.25.1
 torch
 torchaudio
 openai-whisper
+dataocean-dolphin

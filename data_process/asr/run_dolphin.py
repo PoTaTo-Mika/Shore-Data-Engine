@@ -38,7 +38,7 @@ def process_into_list(folder):
     else:
         transcription_pairs = {}
 
-    model = dolphin.load_model("base", "../../checkpoints/dolphin", "cuda")
+    model = dolphin.load_model("base", "./checkpoints/dolphin", "cuda")
 
     # 先收集所有音频文件
     audio_files = []
