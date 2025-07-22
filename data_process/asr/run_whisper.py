@@ -80,5 +80,5 @@ def process_into_list(folder):
     logging.info(f"Total duration: {total_duration/3600:.2f} hours")
 
 if __name__ == "__main__":
-    folder = "data/test"
+    folder = "data/sliced"
     process_into_list(folder)

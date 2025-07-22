@@ -1,4 +1,4 @@
-from slicer import Slicer
+from data_process.slicer.slicer import Slicer
 import librosa
 import soundfile
 import os
