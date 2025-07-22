@@ -83,5 +83,7 @@ def process_into_list(folder):
     logging.info(f"Total duration: {total_duration/3600:.2f} hours")
 
 if __name__ == "__main__":
-    folder = "qtfm"
+    logging.warning("Dolphin can only process audio less than 30 seconds")
+    logging.warning("Please check the audio duration before processing")
+    folder = "data/test"
     process_into_list(folder)
