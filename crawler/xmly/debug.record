@@ -1,0 +1,239 @@
+# 2025-07-23 
+喜马拉雅具有明确且较为复杂的反爬机制，但是已被证实可以攻破。
+依然是使用F12抓包然后分析的方案进行处理，我打开了下面这个链接：
+https://www.ximalaya.com/album/85540285 # 东北出马仙（东北话版）
+点击第一集，然后播放。
+此时开发者页面的Fetch/Xhr当中出现了如下几个请求：
+[1] show?id=799480828&sort=0&size=308ptype=1
+[2] 1753240877385?device=www2&trackId=799480828&trackQualityLevel=1
+在新建标签页中打开 [1] https://www.ximalaya.com/revision/play/v1/show?id=799480828&sort=0&size=30&ptype=1
+获得了如下输出（已被结构化处理和删减，仅作示范）：
+{
+  "ret": 200,
+  "data": {
+    "uid": 565479079,
+    "albumId": 85540285,
+    "sort": 0,
+    "pageNum": 1,
+    "pageSize": 30,
+    "tracksAudioPlay": [
+      {
+        "index": 1,
+        "trackId": 799480828,
+        "trackName": "001集 出马仙家",
+        "trackUrl": "/sound/799480828",
+        "trackCoverPath": "storages/08d0-audiofreehighqps/FE/70/GAqhntALamPkAAdUbwNbQ1kG.jpeg",
+        "albumId": 85540285,
+        "albumName": "东北话小说 | 东北出马仙 | 永久免费",
+        "albumUrl": "/album/85540285",
+        "anchorId": 103752257,
+        "duration": 407,
+        "updateTime": "2025-01",
+        "createTime": "2025-01",
+        "isLike": false,
+        "isCopyright": true
+      },
+      {
+        "index": 2,
+        "trackId": 799480831,
+        "trackName": "002集 出马仙家2",
+        "trackUrl": "/sound/799480831",
+        "trackCoverPath": "storages/08d0-audiofreehighqps/FE/70/GAqhntALamPkAAdUbwNbQ1kG.jpeg",
+        "albumId": 85540285,
+        "albumName": "东北话小说 | 东北出马仙 | 永久免费",
+        "albumUrl": "/album/85540285",
+        "anchorId": 103752257,
+        "duration": 401,
+        "updateTime": "2025-01",
+        "createTime": "2025-01",
+        "isLike": false,
+        "isCopyright": true
+      }
+      ...
+    ],
+    "hasMore": true,
+    "albumRecordSort": 0
+  }
+}
+接下来我又去看了看 [2] https://www.ximalaya.com/mobile-playpage/track/v3/baseInfo/1753240877385?device=www2&trackId=799480828&trackQualityLevel=1
+在新建标签页中打开，发现内容如下：
+{"reqId":"506f115a-126076405","ret":1001,"msg":"系统繁忙，请稍后再试!"}
+嗯，看起来是被风控了，这里反爬虫已经开始发力了。
+但是不要紧，我再次查看这个请求的响应内容：
+{
+    "ret": 0,
+    "extendInfo": {
+        "isDownHimalayaApp": false,
+        "currentPositionFrom": 0,
+        "pageStyle": "old",
+        "currentUid": 565479079,
+        "interval": 10919679256
+    },
+    "trackInfo": {
+        "trackId": 799480828,
+        "title": "001集 出马仙家",
+        "type": 0,
+        "categoryId": 3,
+        "categoryName": "有声书",
+        "intro": "",
+        "headSkip": 0,
+        "tailSkip": 0,
+        "paidType": 0,
+        "processState": 2,
+        "createdAt": 1737813345000,
+        "coverSmall": "http://imagev2.xmcdn.com/storages/08d0-audiofreehighqps/FE/70/GAqhntALamPkAAdUbwNbQ1kG.jpeg!op_type=3&columns=100&rows=100",
+        "coverMiddle": "http://imagev2.xmcdn.com/storages/08d0-audiofreehighqps/FE/70/GAqhntALamPkAAdUbwNbQ1kG.jpeg!op_type=3&columns=180&rows=180",
+        "coverLarge": "http://imagev2.xmcdn.com/storages/08d0-audiofreehighqps/FE/70/GAqhntALamPkAAdUbwNbQ1kG.jpeg!op_type=3&columns=1000&rows=1000",
+        "videoCover": "",
+        "uid": 103752257,
+        "nickname": "喜闻乐见能量站",
+        "isLike": false,
+        "isPublic": true,
+        "likes": 35,
+        "comments": 4,
+        "shares": 11,
+        "userSource": 1,
+        "status": 1,
+        "duration": 407,
+        "sampleDuration": 0,
+        "isPaid": false,
+        "isFree": false,
+        "isAuthorized": true,
+        "isVideo": false,
+        "isDraft": false,
+        "isRichAudio": false,
+        "isAntiLeech": false,
+        "vipFirstStatus": 0,
+        "ximiFirstStatus": 0,
+        "playUrlList": [
+            {
+                "huaweiSound": false,
+                "type": "M4A_64",
+                "fileSize": 2494026,
+                "sampleSize": 586632,
+                "url": "YGmKh8sHX0ahN5csmXs-x2x_R813vJlCnQsf282v9YdhOsjart_cK1mYNXLNnw_mp4pgGxY67SFllpWdNbDwC-nS2dAi2I6xo5Vxqn23DLPvoUdTHbrJ4fohOsHQmxkAlC_u5QeEk7P1yijjO5XXs-Vu2huEUnmZ5HUaAA30FPwcbdglF6bw6wNcFeNwEPYrDm9x1DoDETwANiDdcptvcQaJdAb_jG17uZiURRMZZbdedKeSFi_tRQ-_IO-Sj2andmn7HNxohI7YugjCzi2vjnHmWMUgL-3xAR6ACBd2AOoAO9DlGb29JA",
+                "qualityLevel": 1,
+                "uploadId": 32532676320,
+                "width": 0,
+                "height": 0,
+                "version": 1
+            },
+            {
+                "huaweiSound": false,
+                "type": "MP3_64",
+                "fileSize": 3263678,
+                "sampleSize": 720396,
+                "url": "RbF_xWLL00KhN5csmZ8RtnV7DuXTzKdGnQsf282qH2E70rOwlQPsClmYNXLNe8Lrkr41lvd35J9llpWdNQR_r5065j61UVcI4Nxxqn2BMYBdMw7v7LXv2PohOt5C3SAcqOB7cLfDZnBDItcpRPddWUTrSTC3k-rs1Ta4AA2nygoK4DM8biBNeQNcFeNwQTxZqBTeJrnfR7cANiDdcuU3rzsfQ0Vvab6ZuZiURRNbQtEMKu_6t4D6Eg-_IO-SBrgBnLFBXXzEfhHYAwjCzj-p-6y3j4cZgPqfZlKcMDMwcQcAO9DlGb6dNQ",
+                "qualityLevel": 1,
+                "uploadId": 32532676320,
+                "width": 0,
+                "height": 0,
+                "version": 1
+            },
+            {
+                "huaweiSound": false,
+                "type": "M4A_24",
+                "fileSize": 1270257,
+                "sampleSize": 316576,
+                "url": "3UYXNPhLvF2hN5csmXvyzkjcUEklOE-KnQsf280Og8rBTR0p5E8vJFmYNXLNn8MRGPLtCDGD_XdllpWdNbBPkdCVyjXqAdabtsw4qn23yAWLQFDX25q_-_ohOkjUr3LiVZUdv1ipxMkjF4cEREFA_KIfrNcY6NA_WH1kAA30XRJlQdKagjYHBANcFeNwEMRQosTQCD7ocu4ANiDdcpvJeMBmZBM1zjqSuZiURRMZHhslNzQoGPHUkQ-_IO-SjyR3WEbGwljpw-OzzCjCzi3cTzCghtUu8dTHDyS0PqemSBEAO9DlGb1C2w",
+                "qualityLevel": 0,
+                "uploadId": 32532676320,
+                "width": 0,
+                "height": 0,
+                "version": 1
+            },
+            {
+                "huaweiSound": false,
+                "type": "MP3_32",
+                "fileSize": 1631966,
+                "sampleSize": 360325,
+                "url": "qCQ5WI7eTKWhN5csmZ-3unlHkqizmyggnQsf282b9ErNKWP6CcDZr1mYNXLNe3vyTw6_6VGX1XhllpWdNQSWndpF0oOQrBocuQNxqn2B_4pWHJIhanpJX_ohOkhT-Cg7eQq8-OaL6wGzd-TjDJWOuCH0hSS-MaWmnaggAA2nSSUFmspl9Zb5XgNcFeNwQSqeRWA96U3qPm0ANiDdcuUuRCG_uEjucQlguZiURRNb_gdWp7Cw_qcYeA-_IO-SBnEFySQeXn_4tsDYAwjCzj-RY70mG_3RpxiQOJa_UC3UIGwAO9DlGb4uBA",
+                "qualityLevel": 0,
+                "uploadId": 32532676320,
+                "width": 0,
+                "height": 0,
+                "version": 1
+            },
+            {
+                "huaweiSound": false,
+                "type": "AAC_24",
+                "fileSize": 1632585,
+                "sampleSize": 0,
+                "url": "NKatWI3ImdehN5csmblx_73rmagIpF_znQsf283lucnF4sP6DkwpwVmYNXLN94ff7dOciGVG_kxllpWdNelcPZS8xiSLL-9svpU4qn3scGm9kUXJm9n_a_ohOqIpMrc9T7sv7w5UvZd-d6ckmeydQLDs7Uth69LKDzYgAA2HAghCYx5l9kMRwANcFeNwflixS2q06TKK8HgANiDdcl6fPYUH50gcs3mUuZiURRNDYE78nxGwAdjSbQ-_IO-SqrewJ6bKXgYtrJsqA43Czu7emHnYE_1V2NLKLwmpULgV22YAO9DlGbywGw",
+                "qualityLevel": 0,
+                "uploadId": 32532676320,
+                "width": 0,
+                "height": 0,
+                "version": 1
+            }
+        ],
+        "childAlbumInWhiteList": false,
+        "isEnjoying": false,
+        "offlineVisibleType": 0,
+        "hasShqAuthorized": false,
+        "isXimiUhqTrack": false,
+        "isXimiUhqAuthorized": false,
+        "visibleCrowdType": 0,
+        "playtimes": 35270
+    },
+    "albumInfo": {
+        "albumId": 85540285,
+        "title": "东北话小说 | 东北出马仙 | 永久免费",
+        "coverLarge": "http://imagev2.xmcdn.com/storages/08d0-audiofreehighqps/FE/70/GAqhntALamPkAAdUbwNbQ1kG.jpeg!op_type=3&columns=290&rows=290&magick=png",
+        "ageLevel": 1,
+        "freeListenStatus": 0,
+        "albumType": 0,
+        "status": 1,
+        "offlineType": 0,
+        "isPaid": false,
+        "isPodcastAlbum": false,
+        "isAutoBuy": false
+    },
+    "version": 0,
+    "hasAlbumRealFinished": false
+}
+可以看到，每一集返回的响应的playUrlList当中的url字段就是我们需要的音频链接。
+接下来我们去看开发者模式下的媒体请求，发现m4a链接是直接暴露出来的：
+https://a.xmcdn.com/storages/ce20-audiofreehighqps/12/09/GKwRIUELarBuACYOSgNbbAbl.m4a?sign=1d628b64158002b21071b3c214544cfc&buy_key=www2_a1190044-125972055:565479079&timestamp=1753240877523000&token=3153&duration=407
+也就是说，我们只要能够对url进行解密，就可以获得准确的，可以直接wget到的音频链接。
+下一步，我们应该请求第二集，寻找一下规律。
+https://a.xmcdn.com/storages/d0a0-audiofreehighqps/BB/61/GKwRIRwLarBtACVvfANbbAZT.m4a?sign=02ae688fab7b97f0722d0f2c11a36d00&buy_key=www2_fbbd4c8c-126264517:565479079&timestamp=1753241735289000&token=9798&duration=401
+然后我们就要解决各种复杂的加密方法，我打开了javascript代码。
+算法过于复杂，同时有超过四万行的代码，即使丢给AI也很难破解它。
+我考虑到了另一条路，模拟浏览器发送请求给那个用来加密的js文件，这样它会返回加密后的内容。
+我找到了75b01af22.js文件，并且把它下载了下来。我或许已经找到了加密算法：
+  else {
+    var n = t.trackInfo
+      , a = n.playUrlList
+      , s = n.type;
+    if (a && a.length) {
+        var u = r.getPlayUrl(a)
+          , l = u.encodeText
+          , c = u.qualityLevel;
+        i(Qt({}, Yt(t.trackInfo), {
+            src: r._options.decryptFn ? r._options.decryptFn(l) : Kt(l),
+            type: s,
+            qualityLevel: c
+        }))
+    } else
+        i(Qt({}, Yt(t.trackInfo), {
+            src: "",
+            type: s
+        }))
+}
+这里的加密算法是一个双目运算符（虽然我直到很后来才发现这件事，也就是说一般是用r._options这个函数进行计算的。
+我需要根据现有的信息评估一下我已经逆向到了什么阶段。
+i(Qt({}, Yt(t.trackInfo), {
+    src: r._options.decryptFn ? r._options.decryptFn(l) : Kt(l),
+    type: s,
+    qualityLevel: c
+}))
+同事告诉我，如果_temp=加密的url，那么r._options.decryptFn解出来的内容就是直链。
+随后我在那一行实行了断点，再次运行整个网页，程序准确无误地停在了r._options.decryptFn这一行。
+我在终端输入了l，它输出了加密的url。输入了r._options.decryptFn(l),输出了直接可用的m4a下载直链。
+在一段事件之后，我成功地取得了所有加密的函数，并且把它们提取出来写成了一个js文件：decrypt.js
+经过检验，这个是可以使用的。
+
+# 最终决战
+现在我们已经有了第一步：从专辑的url中获取我们需要的album信息；第三步：从单集信息中获取我们需要的url，然后直接计算导出m4a的地址。
+那么，现在就是处理第二步的时候了！
