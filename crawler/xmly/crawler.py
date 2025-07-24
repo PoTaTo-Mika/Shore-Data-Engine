@@ -4,6 +4,7 @@ import time
 import os
 import subprocess
 
+# 如果要使用这个脚本请提前安装nodejs
 # 喜马拉雅主要按专辑进行爬取，专辑的id在url中
 # PROGRAM_URL = "https://www.ximalaya.com/album/79011323"
 # 请求url，返回的内容是一个json，我们把它保存为一个json文件
