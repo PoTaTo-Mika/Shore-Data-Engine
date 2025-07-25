@@ -209,3 +209,6 @@ __marimo__/
 #数据和权重
 data/
 checkpoints/
+
+# 日志文件
+logs/*.log

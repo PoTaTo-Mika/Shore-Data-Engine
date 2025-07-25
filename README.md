@@ -13,3 +13,11 @@
 ## UVR
 
 使用htdemucs
+
+## 日志输出
+
+所有处理模块的日志文件都会输出到 `logs/` 目录中：
+- `logs/whisper_transcription.log` - Whisper ASR处理日志
+- `logs/dolphin_transcription.log` - Dolphin ASR处理日志  
+- `logs/demucs.log` - UVR音频分离日志
+- `logs/llm_polish.log` - LLM文本润色日志

@@ -3,12 +3,14 @@ import os
 from openai import OpenAI
 import logging
 
+# 确保logs目录存在
+os.makedirs('logs', exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),  # 输出到控制台
-        logging.FileHandler('llm_polish.log', encoding='utf-8')  # 输出到文件
+        logging.FileHandler('logs/llm_polish.log', encoding='utf-8')  # 输出到文件
     ]
 )
 

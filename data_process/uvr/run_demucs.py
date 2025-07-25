@@ -5,12 +5,14 @@ import os
 import logging
 
 # 配置logging
+# 确保logs目录存在
+os.makedirs('logs', exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),  # 输出到控制台
-        logging.FileHandler('demucs.log', encoding='utf-8')  # 输出到文件
+        logging.FileHandler('logs/demucs.log', encoding='utf-8')  # 输出到文件
     ]
 )
 
