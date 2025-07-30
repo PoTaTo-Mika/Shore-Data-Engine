@@ -87,5 +87,5 @@ def process_into_list(folder):
 if __name__ == "__main__":
     logging.warning("Dolphin can only process audio less than 30 seconds")
     logging.warning("Please check the audio duration before processing")
-    folder = "./data/sliced"
+    folder = "data/sliced"
     process_into_list(folder)

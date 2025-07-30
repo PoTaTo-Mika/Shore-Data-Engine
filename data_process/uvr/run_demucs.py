@@ -44,7 +44,7 @@ def process_folder(folder_path):
         process_audio(audio_file, separator)
         
 if __name__ == '__main__':
-    folder = './data'
+    folder = 'data'
     process_folder(folder)
 
 

@@ -8,11 +8,11 @@
 
 ## ASR
 
-提供了两种ASR的模型：Whisper和Dolphin
+提供了三种ASR的模型：Whisper, Sensevoice, Dolphin
 
 ## UVR
 
-使用htdemucs
+使用htdemucs-ft
 
 ## 日志输出
 
