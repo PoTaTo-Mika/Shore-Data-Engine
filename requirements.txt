@@ -5,6 +5,8 @@ numpy<=1.26.4
 
 # Crawl dependencies
 requests>=2.25.1
+httpx>=0.24.0
+beautifulsoup4>=4.12.0
 
 # deeplearning
 torch
