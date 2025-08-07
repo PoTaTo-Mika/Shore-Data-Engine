@@ -2,6 +2,7 @@ import whisper as wsp
 import os
 import json
 import logging
+import platform
 from tqdm import tqdm
 from pathlib import Path
 
@@ -90,7 +91,6 @@ def process_into_list_vllm(folder):
         # 在函数内部导入vllm相关模块，避免Windows环境问题
         import time
         from vllm import LLM, SamplingParams
-        from vllm.assets.audio import AudioAsset
         import librosa
         
         logging.info("VLLM modules imported successfully")
@@ -119,8 +119,8 @@ def process_into_list_vllm(folder):
             model="openai/whisper-large-v3",
             max_model_len=448,
             max_num_seqs=400,
-            limit_mm_per_prompt={"audio": 1},
             kv_cache_dtype="fp8",
+            download_dir="./checkpoints"
         )
         logging.info("VLLM Whisper model loaded successfully")
     except Exception as e:
@@ -231,8 +231,14 @@ if __name__ == "__main__":
     use_vllm = False  # 设置为True使用VLLM，False使用基础Whisper
     
     if use_vllm:
-        print("使用VLLM加速推理进行转录...")
-        process_into_list_vllm(folder)
+        # 检查操作系统平台，vLLM仅在Linux上支持
+        if platform.system() == "Linux":
+            print("使用VLLM加速推理进行转录...")
+            process_into_list_vllm(folder)
+        else:
+            print(f"警告：vLLM仅支持Linux平台，当前系统为 {platform.system()}")
+            print("自动切换到基础Whisper进行转录...")
+            process_into_list(folder)
     else:
         print("使用基础Whisper进行转录...")
         process_into_list(folder)

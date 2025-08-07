@@ -19,4 +19,4 @@ git+https://github.com/facebookresearch/demucs#egg=demucs
 openai
 
 # inference speed up
-vllm
+vllm>=0.10.0
