@@ -25,7 +25,7 @@ def deepseek(json_file, client, fangyan):
                 {"role": "system", "content": "为了保证文件结构，不管你润色后的内容合理与否，你只需要输出润色后的文本，不要输出任何其他内容"}
             ]
             if fangyan == True:
-                messages.append({"role": "system", "content": "请注意，用户给你的文本是方言识别的结果，请根据方言的特点，润色出更准确的文本"})
+                messages.append({"role": "system", "content": "请注意，用户给你的文本是方言识别的结果，请根据方言的特点，润色出更准确的文本，但是要保证不破坏原本文本表达，切勿把有特色的方言字词改成普通话字词"})
             messages.append({"role": "user", "content": f"原始文本: {value}"})
 
             response = client.chat.completions.create(
