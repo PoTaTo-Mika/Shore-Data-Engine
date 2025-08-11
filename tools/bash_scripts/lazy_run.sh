@@ -2,14 +2,16 @@
 # bash tools/bash_scripts/lazy_run.sh
 
 # 将所有的音频全部转换为wav格式
+echo "Start converting..."
 bash tools/bash_scripts/all_to_wav.sh data
 
 # 进行demucs处理
-python data_process/uvr/run_demucs.py
+echo "Start demucs..."
+python -m data_process.uvr.run_demucs
 
 # 开始切分
-echo "Start Slicing..."
-python data_process/slicer/lets_slice.py
+echo "Start slicing..."
+python -m data_process.slicer.lets_slice
 
 # 开始asr处理
 # python data_process/asr/run_whisper.py
