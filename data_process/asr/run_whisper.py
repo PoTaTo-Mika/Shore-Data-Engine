@@ -225,20 +225,35 @@ def process_into_list_vllm(folder):
 
 
 if __name__ == "__main__":
-    folder = "data/sliced"
-    
-    # 选择使用基础Whisper还是VLLM加速推理
+    # 新增：遍历 data 下所有包含 sliced 的专辑目录，并在各自 sliced 目录生成 transcription.json
+    data_root = "data"
+
+    def _iter_sliced_dirs(root_dir: str):
+        root_path = Path(root_dir)
+        # 查找所有名为 sliced 的目录
+        return [p for p in root_path.rglob('sliced') if p.is_dir()]
+
+    def _process_all_sliced(root_dir: str, use_vllm: bool = False):
+        sliced_dirs = _iter_sliced_dirs(root_dir)
+        logging.info(f"Found {len(sliced_dirs)} 'sliced' directories under {root_dir}")
+        for sliced_dir in sliced_dirs:
+            logging.info(f"Processing sliced directory: {sliced_dir}")
+            if use_vllm:
+                process_into_list_vllm(str(sliced_dir))
+            else:
+                process_into_list(str(sliced_dir))
+
+    # 选择使用基础Whisper还是VLLM加速推理，对所有 sliced 目录执行
     use_vllm = False  # 设置为True使用VLLM，False使用基础Whisper
-    
+
+    if use_vllm and platform.system() != "Linux":
+        print(f"警告：vLLM仅支持Linux平台，当前系统为 {platform.system()}")
+        print("自动切换到基础Whisper进行转录...")
+        use_vllm = False
+
     if use_vllm:
-        # 检查操作系统平台，vLLM仅在Linux上支持
-        if platform.system() == "Linux":
-            print("使用VLLM加速推理进行转录...")
-            process_into_list_vllm(folder)
-        else:
-            print(f"警告：vLLM仅支持Linux平台，当前系统为 {platform.system()}")
-            print("自动切换到基础Whisper进行转录...")
-            process_into_list(folder)
+        print("使用VLLM加速推理进行转录...")
     else:
         print("使用基础Whisper进行转录...")
-        process_into_list(folder)
+
+    _process_all_sliced(data_root, use_vllm)

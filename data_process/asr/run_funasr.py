@@ -206,5 +206,19 @@ def process_folder(folder: str):
 
 
 if __name__ == "__main__":
-    target_folder = "data/sliced"  # 默认路径，可根据需要修改
-    process_folder(target_folder)
+    # 遍历 data 下所有包含 sliced 的专辑目录，并在各自 sliced 目录生成 transcription.json
+    data_root = "data"
+
+    def _iter_sliced_dirs(root_dir: str):
+        root_path = Path(root_dir)
+        # 查找所有名为 sliced 的目录
+        return [p for p in root_path.rglob('sliced') if p.is_dir()]
+
+    def _process_all_sliced(root_dir: str):
+        sliced_dirs = _iter_sliced_dirs(root_dir)
+        logging.info(f"Found {len(sliced_dirs)} 'sliced' directories under {root_dir}")
+        for sliced_dir in sliced_dirs:
+            logging.info(f"Processing sliced directory: {sliced_dir}")
+            process_folder(str(sliced_dir))
+
+    _process_all_sliced(data_root)
