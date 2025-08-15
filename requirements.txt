@@ -40,3 +40,8 @@ openai>=1.0.0
 # Optional: vLLM acceleration for Whisper (Linux only)
 # Uncomment on Linux if you plan to use run_whisper.py with vLLM
 # vllm>=0.10.0
+
+#############################################
+# Web UI
+#############################################
+gradio>=4.32.0
