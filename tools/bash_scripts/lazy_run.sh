@@ -12,6 +12,7 @@ python -m data_process.uvr.run_demucs
 # 开始切分
 echo "Start slicing..."
 python -m data_process.slicer.lets_slice
+# python -m data_process.slicer.vad
 
 # 开始asr处理
 # python data_process/asr/run_whisper.py
@@ -19,4 +20,4 @@ python -m data_process.asr.run_funasr
 # python data_process/asr/run_dolphin.py
 
 # 最后提取label为一个个小文件
-python tools/extract_label.py
+# python tools/extract_label.py

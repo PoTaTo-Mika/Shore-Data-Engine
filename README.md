@@ -4,7 +4,7 @@
 
 包含模块：
 - 爬虫：蜻蜓 FM、喜马拉雅 FM、VoiceWiki 语音及文本采集
-- 数据切分：静音切分工具（基于 RMS 传统烟）
+- 数据切分：静音切分工具（基于 RMS 传统烟）/ Ten-VAD (Agora旗下的TenFramework)
 - ASR：Whisper、FunASR、Dolphin 多模型转写
 - UVR：Demucs 声部分离（提取人声）
 - 文本润色：调用大模型对转写结果进行自动润色
