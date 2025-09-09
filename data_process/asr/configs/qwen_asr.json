@@ -1,0 +1,11 @@
+{
+    "api_key": "sk-0c175e70a83d40ac8b6a0ae2d53b3dd7",
+    "model": "qwen3-asr-flash",
+    "context": "",
+    "enable_lid": true,
+    "enable_itn": false,
+    "language": "",
+    "mode": "",
+    "audio_file_path": "",
+    "data_root": "data"
+}
