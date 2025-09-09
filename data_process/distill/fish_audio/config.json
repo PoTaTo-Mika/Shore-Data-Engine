@@ -1,0 +1,21 @@
+{
+    "API_KEY": "681a633672434423b4d182af541f871b",
+    "OUT_DIR": "data/distill/fish_audio",
+
+    "FORMAT": "mp3",
+    "MP3_BITRATE": 128,
+    "CHUNK_LENGTH": 200,
+    "LATENCY": "balanced",
+    "NORMALIZE": true,
+    "SAMPLE_RATE": null,
+
+    "REFERENCE": "",
+    "REF_TEXT": "",
+    "REFERENCE_ID": "",
+
+    "TOP_P": 0.7,
+    "TEMPERATURE": 0.7,
+    "BACKEND": "speech-1.6",
+
+    "TEXT": ""
+}

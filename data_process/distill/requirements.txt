@@ -1,1 +1,2 @@
 websockets
+fish-audio-sdk
