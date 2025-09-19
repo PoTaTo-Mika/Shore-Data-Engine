@@ -120,7 +120,6 @@ for idx, ep in enumerate(all_episodes, start=1):
                     f.write(chunk)
 
         logging.info(f"[{idx}/{total_for_log}]下载完成:{ep_title}")
-        logging.info("别给我网站草死了")
         time.sleep(1)
 
     except Exception as e:
