@@ -29,6 +29,8 @@ while IFS= read -r -d '' file; do
     # 转换为wav
     echo "转换: $file"
 
+    # 如果需要重采样，可以添加 -ar 44100 等参数，例如：
+    # ffmpeg -nostdin -i "$file" -ar 44100 -ac 2 -y "$basename.wav" 2>/dev/null
     if ffmpeg -nostdin -i "$file" -y "$basename.wav" 2>/dev/null; then
         echo "完成: $basename.wav"
         rm "$file"
