@@ -3,7 +3,7 @@ import demucs.api
 import tqdm
 import os
 import logging
-from multiprocessing import Process, set_start_method, freeze_support
+from multiprocessing import Process
 from typing import List
 
 # 配置logging
@@ -125,15 +125,8 @@ def process_folder(folder_path: str):
     for p in processes:
         p.join()
         
-if __name__ == '__main__':
-    # Windows 下使用 spawn，并确保冻结支持
-    try:
-        set_start_method('spawn')
-    except RuntimeError:
-        # 已设置过启动方式
-        pass
-    freeze_support()
-    folder = 'data'
-    process_folder(folder)
+# Linux 下直接执行
+folder = 'data'
+process_folder(folder)
 
 

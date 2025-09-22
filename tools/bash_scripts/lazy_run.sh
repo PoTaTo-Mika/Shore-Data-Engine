@@ -20,7 +20,7 @@ python -m data_process.asr.run_funasr
 # python data_process/asr/run_dolphin.py
 
 # 最后提取label为一个个小文件
-# python tools/extract_label.py
+python tools/extract_label.py
 
 # 检查data目录
 # 归档并切分每个子目录下的 sliced 结果（固定每卷 10G）
@@ -45,8 +45,8 @@ for dir in "$DATA_DIR"/*/; do
     # 若不存在目标目录则跳过
     [ -d "$target_dir" ] || continue
 
-    # 打包并分卷，随后移动到 update
-    tar -C "$dir" -cvf - "$base" | split -b "$CHUNK_SIZE" -d -a 3 - "${DATA_DIR}/${base}.tar."
+    # 打包并分卷（纯归档，不压缩），随后移动到 update
+    tar -C "$dir" -cf - "$base" | split -b "$CHUNK_SIZE" -d -a 3 - "${DATA_DIR}/${base}.tar."
     mv "${DATA_DIR}/${base}.tar."* "$UPDATE_DIR"/
 done
 
