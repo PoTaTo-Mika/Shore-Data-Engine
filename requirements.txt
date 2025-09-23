@@ -35,7 +35,8 @@ torchaudio
 # LLM polish and APIs
 #############################################
 openai>=1.0.0
-
+transformers
+modelscope
 #############################################
 # Optional: vLLM acceleration for Whisper (Linux only)
 # Uncomment on Linux if you plan to use run_whisper.py with vLLM

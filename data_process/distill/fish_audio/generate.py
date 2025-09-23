@@ -163,7 +163,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--config",
-        default=str(Path(__file__).with_name("config.json")),
+        default=str(Path(__file__).parents[3] / "configs" / "fish_audio.json"),
         help="Path to config.json",
     )
     parser.add_argument(
