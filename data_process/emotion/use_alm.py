@@ -71,13 +71,63 @@ def Qwen3_Omni_Recognition(audio_path,model):
     return outputs[0].outputs[0].text
 
 def process_list(folder, model):
+    from pathlib import Path
+    import json
+    from tqdm import tqdm
+    
+    # 支持的音频文件扩展名
+    audio_extensions = ['.mp3', '.wav', '.m4a', '.ogg', '.flac', '.aac', '.wma', '.webm', '.opus']
+    
+    folder_path = Path(folder)
+    json_output_path = folder_path / "emotion_results.json"
+    
+    # 如果JSON文件已存在，加载现有数据
+    if json_output_path.exists():
+        with open(json_output_path, "r", encoding='utf-8') as f:
+            emotion_results = json.load(f)
+        logging.info(f"Loaded existing emotion data with {len(emotion_results)} entries")
+    else:
+        emotion_results = {}
+    
+    # 收集所有音频文件
     audio_files = []
-    for audio_file in folder.rglob('*'):
-        audio_files.append(audio_file)
+    for audio_file in folder_path.rglob('*'):
+        if audio_file.is_file() and audio_file.suffix.lower() in audio_extensions:
+            audio_files.append(audio_file)
+    
     logging.info(f"Found {len(audio_files)} audio files to process")
     
-    for audio_file in audio_files:
+    # 使用tqdm显示进度
+    for audio_file in tqdm(audio_files, desc="Processing emotion recognition", unit="file"):
+        try:
+            # 获得绝对路径
+            audio_path = str(audio_file.absolute())
+            
+            # 检查是否已经处理过这个文件
+            if audio_path in emotion_results:
+                logging.info(f"Skipping already processed file: {audio_file}")
+                continue
+                
+            logging.info(f"Processing emotion for: {audio_file}")
+            
+            # 进行情感识别
+            emotion = Qwen3_Omni_Recognition(audio_path, model)
+            
+            # 保存结果
+            emotion_results[audio_path] = emotion
+            
+            # 立即保存到JSON文件
+            with open(json_output_path, "w", encoding='utf-8') as f:
+                json.dump(emotion_results, f, ensure_ascii=False, indent=2)
+            
+            logging.info(f"Emotion recognized and saved: {audio_file} -> {emotion}")
         
+        except Exception as e:
+            logging.error(f"Error processing {audio_file}: {e}")
+            # 继续处理下一个文件
+    
+    logging.info(f"Emotion recognition completed. Results saved to {json_output_path}")
+    logging.info(f"Total {len(emotion_results)} files processed")
 
 if __name__ == "__main__":
 
@@ -106,6 +156,8 @@ if __name__ == "__main__":
         top_k=20,
         max_tokens=16384,
     )
+
+    process_list(config["data_path"], model)
 
 
 
