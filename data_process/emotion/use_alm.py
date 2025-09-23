@@ -21,24 +21,15 @@ logging.basicConfig(
 )
 
 
-def Qwen3_Omni_Recognition(audio_path,model):
+def Qwen3_Omni_Recognition(audio_path, model, processor, sampling_params):
     # 往挂上的LLM发请求
     llm = model
     messages = [
         {
-            "role": "system",
-            "content": [
-                "You are a helpful assistant that can help analyze the emotion from audio and video clips.",
-                "The user will give you several audio clips, please tell the emotion in the text format."
-                "The emotion can be categorized into 7 categories: happy, sad, angry, fearful, surprised, disgusted, and neutral."
-                "You should only output the emotion in the text format, no other text."
-            ], 
-        },
-        {
             "role": "user",
             "content": [
-                {"audio": audio_path},
-                "Please tell me what emotion is shown in the audio clip."
+                {"type": "audio", "audio": audio_path},
+                {"type": "text", "text": "请分析这段音频中的情感，只输出情感类别：happy, sad, angry, fearful, surprised, disgusted, neutral"}
             ],
         }
     ]
@@ -67,10 +58,24 @@ def Qwen3_Omni_Recognition(audio_path,model):
         inputs['multi_modal_data']['audio'] = audios
 
     outputs = llm.generate([inputs], sampling_params=sampling_params)
+    
+    # 调试信息
+    logging.info(f"Outputs type: {type(outputs)}")
+    logging.info(f"Outputs[0] type: {type(outputs[0])}")
+    logging.info(f"Outputs[0] content: {outputs[0]}")
+    
+    # 安全地获取结果
+    if hasattr(outputs[0], 'outputs') and len(outputs[0].outputs) > 0:
+        if hasattr(outputs[0].outputs[0], 'text'):
+            return outputs[0].outputs[0].text
+        else:
+            logging.error(f"outputs[0].outputs[0] has no 'text' attribute: {outputs[0].outputs[0]}")
+            return str(outputs[0].outputs[0])
+    else:
+        logging.error(f"Unexpected output structure: {outputs[0]}")
+        return str(outputs[0])
 
-    return outputs[0].outputs[0].text
-
-def process_list(folder, model):
+def process_list(folder, model, processor, sampling_params):
     from pathlib import Path
     import json
     from tqdm import tqdm
@@ -111,7 +116,7 @@ def process_list(folder, model):
             logging.info(f"Processing emotion for: {audio_file}")
             
             # 进行情感识别
-            emotion = Qwen3_Omni_Recognition(audio_path, model)
+            emotion = Qwen3_Omni_Recognition(audio_path, model, processor, sampling_params)
             
             # 保存结果
             emotion_results[audio_path] = emotion
@@ -123,7 +128,9 @@ def process_list(folder, model):
             logging.info(f"Emotion recognized and saved: {audio_file} -> {emotion}")
         
         except Exception as e:
+            import traceback
             logging.error(f"Error processing {audio_file}: {e}")
+            logging.error(f"Traceback: {traceback.format_exc()}")
             # 继续处理下一个文件
     
     logging.info(f"Emotion recognition completed. Results saved to {json_output_path}")
@@ -140,24 +147,25 @@ if __name__ == "__main__":
         
         if 'Qwen' in model_name:
             model = LLM(
-                model=cur_path, trust_remote_code=True, gpu_memory_utilization=0.95,
+                model=cur_path, trust_remote_code=True, 
+                gpu_memory_utilization=0.9,  # 降低GPU内存使用率
                 tensor_parallel_size=torch.cuda.device_count(),
                 limit_mm_per_prompt={'image': 0, 'video': 1, 'audio': 1} 
                 if 'Captioner' not in model_name else {'audio': 1},
-                max_num_seqs=8,
-                max_model_len=32768,
+                max_num_seqs=2,  # 减少并发序列数
+                max_model_len=4096,  # 减少最大模型长度
                 seed=1145,
             )
             processor = Qwen3OmniMoeProcessor.from_pretrained(cur_path)
 
         sampling_params = SamplingParams(
-        temperature=0.6,
-        top_p=0.95,
-        top_k=20,
-        max_tokens=16384,
+        temperature=0.7,  # README建议使用0.7
+        top_p=0.8,        # README建议使用0.8
+        top_k=20,         # README建议使用20
+        max_tokens=4096, # README建议使用16384
     )
 
-    process_list(config["data_path"], model)
+    process_list(config["data_path"], model, processor, sampling_params)
 
 
 
