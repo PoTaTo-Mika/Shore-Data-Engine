@@ -67,11 +67,6 @@ def Qwen3_Omni_Recognition(audio_path, model, processor, sampling_params, asr_te
 
     outputs = llm.generate([inputs], sampling_params=sampling_params)
     
-    # 调试信息
-    logging.info(f"Outputs type: {type(outputs)}")
-    logging.info(f"Outputs[0] type: {type(outputs[0])}")
-    logging.info(f"Outputs[0] content: {outputs[0]}")
-    
     # 安全地获取结果
     if hasattr(outputs[0], 'outputs') and len(outputs[0].outputs) > 0:
         if hasattr(outputs[0].outputs[0], 'text'):
