@@ -1,4 +1,5 @@
 {
     "model":"Qwen/Qwen3-Omni-30B-A3B-Instruct",
-    "data_path":"data"
+    "data_path":"data",
+    "asr_text_path":"data/transcription.json"
 }

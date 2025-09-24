@@ -21,16 +21,24 @@ logging.basicConfig(
 )
 
 
-def Qwen3_Omni_Recognition(audio_path, model, processor, sampling_params):
+def Qwen3_Omni_Recognition(audio_path, model, processor, sampling_params, asr_text=None):
     # 往挂上的LLM发请求
     llm = model
+    # 构建消息内容
+    content = [
+        {"type": "audio", "audio": audio_path}
+    ]
+    
+    # 如果有ASR转写文本，添加到消息中
+    if asr_text:
+        content.append({"type": "text", "text": f"转写文本：{asr_text}"})
+    
+    content.append({"type": "text", "text": f"请结合音频和转写文本分析这段内容中的情感，只输出情感类别：happy, sad, angry, fearful, surprised, disgusted, neutral"})
+    
     messages = [
         {
             "role": "user",
-            "content": [
-                {"type": "audio", "audio": audio_path},
-                {"type": "text", "text": "请分析这段音频中的情感，只输出情感类别：happy, sad, angry, fearful, surprised, disgusted, neutral"}
-            ],
+            "content": content,
         }
     ]
     
@@ -75,7 +83,7 @@ def Qwen3_Omni_Recognition(audio_path, model, processor, sampling_params):
         logging.error(f"Unexpected output structure: {outputs[0]}")
         return str(outputs[0])
 
-def process_list(folder, model, processor, sampling_params):
+def process_list(folder, model, processor, sampling_params, asr_json_path=None):
     from pathlib import Path
     import json
     from tqdm import tqdm
@@ -85,6 +93,21 @@ def process_list(folder, model, processor, sampling_params):
     
     folder_path = Path(folder)
     json_output_path = folder_path / "emotion_results.json"
+    
+    # 加载ASR转写结果
+    asr_data = {}
+    if asr_json_path and Path(asr_json_path).exists():
+        try:
+            with open(asr_json_path, "r", encoding='utf-8') as f:
+                asr_data = json.load(f)
+            logging.info(f"Loaded ASR data with {len(asr_data)} entries from {asr_json_path}")
+        except Exception as e:
+            logging.error(f"Error loading ASR data from {asr_json_path}: {e}")
+            logging.warning("Continuing without ASR data")
+    elif asr_json_path:
+        logging.warning(f"ASR file not found: {asr_json_path}, continuing without ASR data")
+    else:
+        logging.info("No ASR file specified, processing audio-only")
     
     # 如果JSON文件已存在，加载现有数据
     if json_output_path.exists():
@@ -115,8 +138,15 @@ def process_list(folder, model, processor, sampling_params):
                 
             logging.info(f"Processing emotion for: {audio_file}")
             
+            # 获取对应的ASR转写文本
+            asr_text = asr_data.get(audio_path)
+            if asr_text:
+                logging.info(f"Found ASR text for {audio_file}: {asr_text[:100]}...")
+            else:
+                logging.info(f"No ASR text found for {audio_file}, using audio-only analysis")
+            
             # 进行情感识别
-            emotion = Qwen3_Omni_Recognition(audio_path, model, processor, sampling_params)
+            emotion = Qwen3_Omni_Recognition(audio_path, model, processor, sampling_params, asr_text)
             
             # 保存结果
             emotion_results[audio_path] = emotion
@@ -165,7 +195,9 @@ if __name__ == "__main__":
         max_tokens=4096, # README建议使用16384
     )
 
-    process_list(config["data_path"], model, processor, sampling_params)
+    # 获取ASR文件路径（如果存在）
+    asr_path = config.get("asr_text_path")
+    process_list(config["data_path"], model, processor, sampling_params, asr_path)
 
 
 
