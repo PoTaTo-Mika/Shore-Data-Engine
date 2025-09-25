@@ -33,9 +33,7 @@ def Qwen3_Omni_Recognition(audio_path, model, processor, sampling_params, asr_te
     if asr_text:
         content.append({"type": "text", "text": f"转写文本：{asr_text}"})
     
-    content.append({"type": "text", "text": f"请结合音频和转写文本分析这段内容中的情感，只输出情感类别：happy, amused, excited, satisfied, relaxed, sad, frustrated, guilty, angry, fearful, anxious, disgust, jealous, surprised, confused, curious, eager, adoring, interested, neutral."})
-    # 整体来说，除了 happy,sad,angry,fearful,surprised,disgusted,neutral
-    # 还有更加细分的 curious,depressed,excited,relaxed,anxious,jealous,frustrated,disappointed
+    content.append({"type": "text", "text": f"请结合音频和转写文本，描述音频内容，包括情绪，副语言，语种等多种语言学特征。只需要回复文本内容即可。"})
     messages = [
         {
             "role": "user",
@@ -88,7 +86,7 @@ def process_list(folder, model, processor, sampling_params, asr_json_path=None):
     audio_extensions = ['.mp3', '.wav', '.m4a', '.ogg', '.flac', '.aac', '.wma', '.webm', '.opus']
     
     folder_path = Path(folder)
-    json_output_path = folder_path / "emotion_results.json"
+    json_output_path = folder_path / "describe_results.json"
     
     # 加载ASR转写结果
     asr_data = {}
@@ -108,10 +106,10 @@ def process_list(folder, model, processor, sampling_params, asr_json_path=None):
     # 如果JSON文件已存在，加载现有数据
     if json_output_path.exists():
         with open(json_output_path, "r", encoding='utf-8') as f:
-            emotion_results = json.load(f)
-        logging.info(f"Loaded existing emotion data with {len(emotion_results)} entries")
+            describe_results = json.load(f)
+        logging.info(f"Loaded existing describe data with {len(describe_results)} entries")
     else:
-        emotion_results = {}
+        describe_results = {}
     
     # 收集所有音频文件
     audio_files = []
@@ -122,17 +120,17 @@ def process_list(folder, model, processor, sampling_params, asr_json_path=None):
     logging.info(f"Found {len(audio_files)} audio files to process")
     
     # 使用tqdm显示进度
-    for audio_file in tqdm(audio_files, desc="Processing emotion recognition", unit="file"):
+    for audio_file in tqdm(audio_files, desc="Processing describe recognition", unit="file"):
         try:
             # 获得绝对路径
             audio_path = str(audio_file.absolute())
             
             # 检查是否已经处理过这个文件
-            if audio_path in emotion_results:
+            if audio_path in describe_results:
                 logging.info(f"Skipping already processed file: {audio_file}")
                 continue
                 
-            logging.info(f"Processing emotion for: {audio_file}")
+            logging.info(f"Processing describe for: {audio_file}")
             
             # 获取对应的ASR转写文本
             asr_text = asr_data.get(audio_path)
@@ -142,16 +140,16 @@ def process_list(folder, model, processor, sampling_params, asr_json_path=None):
                 logging.info(f"No ASR text found for {audio_file}, using audio-only analysis")
             
             # 进行情感识别
-            emotion = Qwen3_Omni_Recognition(audio_path, model, processor, sampling_params, asr_text)
+            describe = Qwen3_Omni_Recognition(audio_path, model, processor, sampling_params, asr_text)
             
             # 保存结果
-            emotion_results[audio_path] = emotion
+            describe_results[audio_path] = describe
             
             # 立即保存到JSON文件
             with open(json_output_path, "w", encoding='utf-8') as f:
-                json.dump(emotion_results, f, ensure_ascii=False, indent=2)
+                json.dump(describe_results, f, ensure_ascii=False, indent=2)
             
-            logging.info(f"Emotion recognized and saved: {audio_file} -> {emotion}")
+            logging.info(f"describe recognized and saved: {audio_file} -> {describe}")
         
         except Exception as e:
             import traceback
@@ -159,8 +157,8 @@ def process_list(folder, model, processor, sampling_params, asr_json_path=None):
             logging.error(f"Traceback: {traceback.format_exc()}")
             # 继续处理下一个文件
     
-    logging.info(f"Emotion recognition completed. Results saved to {json_output_path}")
-    logging.info(f"Total {len(emotion_results)} files processed")
+    logging.info(f"Describe recognition completed. Results saved to {json_output_path}")
+    logging.info(f"Total {len(describe_results)} files processed")
 
 if __name__ == "__main__":
 
