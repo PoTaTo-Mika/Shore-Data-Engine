@@ -178,7 +178,7 @@ if __name__ == "__main__":
                 tensor_parallel_size=torch.cuda.device_count(),
                 limit_mm_per_prompt={'image': 0, 'video': 1, 'audio': 1} 
                 if 'Captioner' not in model_name else {'audio': 1},
-                max_num_seqs=4,  # 减少并发序列数
+                max_num_seqs=32,  
                 max_model_len=4096,  # 减少最大模型长度
                 seed=1145,
             )

@@ -33,7 +33,7 @@ def Qwen3_Omni_Recognition(audio_path, model, processor, sampling_params, asr_te
     if asr_text:
         content.append({"type": "text", "text": f"转写文本：{asr_text}"})
     
-    content.append({"type": "text", "text": f"请结合音频和转写文本，描述音频内容，包括情绪，副语言，语种等多种语言学特征。只需要回复文本内容即可。"})
+    content.append({"type": "text", "text": f"请结合音频和转写文本，描述音频内容，包括情绪，副语言，语种等多种语言学特征。只需要以一整段文本的形式回复即可，无需使用markdown逐个列举。"})
     messages = [
         {
             "role": "user",
