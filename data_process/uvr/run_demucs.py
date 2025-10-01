@@ -3,20 +3,26 @@ import demucs.api
 import tqdm
 import os
 import logging
+import multiprocessing
 from multiprocessing import Process
 from typing import List
 
+# 设置多进程启动方法为 spawn（必须在其他导入之前）
+if __name__ == '__main__':
+    multiprocessing.set_start_method('spawn', force=True)
+
 # 配置logging
-# 确保logs目录存在
-os.makedirs('logs', exist_ok=True)
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - [%(processName)s PID:%(process)d] - %(message)s',
-    handlers=[
-        logging.StreamHandler(),  # 输出到控制台
-        logging.FileHandler('logs/demucs.log', encoding='utf-8')  # 输出到文件
-    ]
-)
+def setup_logging():
+    # 确保logs目录存在
+    os.makedirs('logs', exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - [%(processName)s PID:%(process)d] - %(message)s',
+        handlers=[
+            logging.StreamHandler(),  # 输出到控制台
+            logging.FileHandler('logs/demucs.log', encoding='utf-8')  # 输出到文件
+        ]
+    )
 
 def process_audio(audio_path, separator):
     origin, separated = separator.separate_audio_file(audio_path)
@@ -54,6 +60,9 @@ def _split_evenly(items: List[str], num_parts: int) -> List[List[str]]:
     return result
 
 def _worker_run_on_gpu(gpu_index: int, files: List[str]):
+    # 在子进程中重新设置 logging（spawn 模式需要）
+    setup_logging()
+    
     # 选择设备
     use_cuda = torch.cuda.is_available() and torch.cuda.device_count() > 0
     device_str = f'cuda:{gpu_index}' if use_cuda else 'cpu'
@@ -124,9 +133,11 @@ def process_folder(folder_path: str):
 
     for p in processes:
         p.join()
-        
-# Linux 下直接执行
-folder = 'data'
-process_folder(folder)
 
-
+if __name__ == '__main__':
+    # 设置 logging
+    setup_logging()
+    
+    # Linux 下直接执行
+    folder = 'data'
+    process_folder(folder)
