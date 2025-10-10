@@ -17,7 +17,7 @@ python -m data_process.slicer.lets_slice
 # 开始asr处理
 # python data_process/asr/run_whisper.py
 python -m data_process.asr.run_funasr
-# python data_process/asr/run_dolphin.py
+# python data_process/asr/run_funasr_chuan.py
 
 # 最后提取label为一个个小文件
 python tools/extract_label.py

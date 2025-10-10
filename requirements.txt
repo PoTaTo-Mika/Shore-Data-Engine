@@ -18,7 +18,6 @@ beautifulsoup4>=4.12.0
 #############################################
 openai-whisper>=20231117
 funasr
-dataoceanai-dolphin
 
 #############################################
 # Source separation (UVR via Demucs)

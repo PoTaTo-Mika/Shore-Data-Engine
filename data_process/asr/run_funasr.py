@@ -8,7 +8,6 @@ import soundfile as sf
 import librosa
 import tempfile
 
-# 配置 logging，保持与 run_whisper.py 一致
 os.makedirs('logs', exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
@@ -79,21 +78,19 @@ def process_folder(folder: str):
 
     # 加载 FunASR 模型
     logging.info("Loading FunASR models ... (this may take a while for the first time)")
-    # 1) 仅加载 ASR（Paraformer），以便进行真正的批量推理
+
     asr_model = AutoModel(
-        model="paraformer-zh",
+        model="./checkpoints/paraformer-zh",
     )
-    # 2) 单独加载标点模型（串行文本修复，轻量）
+
     punc_model = AutoModel(
-        model="ct-punc",
+        model="./checkpoints/ct-punc",
     )
     logging.info("ASR (paraformer-zh) and PUNC (ct-punc) models loaded successfully")
 
-    # 收集全部音频文件
     audio_files = [p for p in folder_path.rglob('*') if p.is_file() and p.suffix.lower() in audio_extensions]
     logging.info(f"Found {len(audio_files)} audio files to process")
 
-    # 生成待处理列表（过滤已处理）
     pending_files = []
     for p in audio_files:
         abs_path = str(p.absolute())

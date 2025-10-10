@@ -41,7 +41,9 @@ def transcribe_with_qwen_asr(
         try:
             import json
             from pathlib import Path
-            config_path = Path(__file__).resolve().parent / "configs" / "qwen_asr.json"
+            # 修改配置文件路径到项目根目录下的configs文件夹
+            project_root = Path(__file__).resolve().parents[2]
+            config_path = project_root / "configs" / "qwen_asr.json"
             if config_path.exists():
                 with open(config_path, "r", encoding="utf-8") as f:
                     cfg = json.load(f)

@@ -214,3 +214,4 @@ checkpoints/
 logs/*.log
 */*.data
 .cursor
+.vscode
