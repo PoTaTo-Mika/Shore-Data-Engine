@@ -14,15 +14,16 @@ httpx>=0.24.0
 beautifulsoup4>=4.12.0
 
 #############################################
+# Source separation (UVR via Demucs)
+#############################################
+git+https://github.com/facebookresearch/demucs#egg=demucs # first as it's torch dependency is the 2.0.1
+
+#############################################
 # ASR models (install the ones you need)
 #############################################
 openai-whisper>=20231117
+huggingface-hub
 funasr
-
-#############################################
-# Source separation (UVR via Demucs)
-#############################################
-git+https://github.com/facebookresearch/demucs#egg=demucs
 
 #############################################
 # Deep learning runtime (install torch/torchaudio per platform/CUDA)
