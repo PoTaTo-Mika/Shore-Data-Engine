@@ -3,11 +3,13 @@
 
 # 将所有的音频全部转换为wav格式
 echo "Start converting..."
-bash tools/bash_scripts/all_to_wav.sh data
+bash tools/bash_scripts/all_to_opus.sh data 8
 
 # 进行demucs处理
 echo "Start demucs..."
 python -m data_process.uvr.run_demucs
+
+# 把data目录下的所有.finish给去掉。
 
 # 开始切分
 echo "Start slicing..."

@@ -51,10 +51,9 @@ convert_file() {
     
     echo "转换: $file"
     
-    # 如果需要重采样，可以添加 -ar 44100 等参数，例如：
-    # ffmpeg -nostdin -i "$file" -ar 44100 -ac 2 -y "$basename.wav" 2>/dev/null
-    if ffmpeg -nostdin -i "$file" -y "$basename.wav" 2>/dev/null; then
-        echo "完成: $basename.wav"
+    # 转换为Opus格式，使用libopus编码器，设置音频质量
+    if ffmpeg -nostdin -i "$file" -c:a libopus -b:a 128k -vbr on -y "$basename.opus" 2>/dev/null; then
+        echo "完成: $basename.opus"
         rm "$file"
         echo "已删除源文件: $file"
     else

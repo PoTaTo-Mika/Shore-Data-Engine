@@ -26,7 +26,7 @@ def process_audio(audio_path: str, model: AutoModel) -> str:
         if info.samplerate != 16000:
             logging.debug(f"Converting {audio_path} from {info.samplerate}Hz to 16000Hz")
             audio_data, _ = librosa.load(audio_path, sr=16000)
-            temp_file = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+            temp_file = tempfile.NamedTemporaryFile(suffix='.opus', delete=False)
             temp_path = temp_file.name
             temp_file.close()
             sf.write(temp_path, audio_data, 16000)
