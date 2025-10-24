@@ -223,5 +223,5 @@ if __name__ == '__main__':
         logging.error("FFmpeg not found. Please ensure it is installed and in your system's PATH.")
         exit(1)
     
-    folder = '/hdd_common/gm_data' # 修改为你的目标文件夹
+    folder = './data' # 修改为你的目标文件夹
     process_folder(folder)
