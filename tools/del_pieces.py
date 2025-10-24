@@ -13,8 +13,8 @@ def get_audio_duration(file_path):
         print(f"无法读取音频文件 {file_path}: {e}")
         return None
 
-def delete_short_audio_files(directory, min_duration_ms=2000):
-    """删除指定目录下短于指定时长的音频文件"""
+def delete_short_and_long_audio_files(directory, min_duration_ms=5000, max_duration_ms=45000):
+    """删除指定目录下短于或长于指定时长的音频文件"""
     directory = Path(directory)
     if not directory.exists():
         print(f"目录不存在: {directory}")
@@ -34,10 +34,11 @@ def delete_short_audio_files(directory, min_duration_ms=2000):
             
             duration_ms = get_audio_duration(audio_file)
             if duration_ms is not None:
-                if duration_ms < min_duration_ms:
+                if duration_ms < min_duration_ms or duration_ms > max_duration_ms:
                     try:
                         audio_file.unlink()  # 删除文件
-                        print(f"已删除短音频文件: {audio_file} (时长: {duration_ms:.1f}ms)")
+                        duration_type = "短" if duration_ms < min_duration_ms else "长"
+                        print(f"已删除{duration_type}音频文件: {audio_file} (时长: {duration_ms:.1f}ms)")
                         deleted_count += 1
                     except Exception as e:
                         print(f"删除文件失败 {audio_file}: {e}")
@@ -46,18 +47,21 @@ def delete_short_audio_files(directory, min_duration_ms=2000):
     
     print(f"\n处理完成!")
     print(f"总共检查了 {total_count} 个音频文件")
-    print(f"删除了 {deleted_count} 个短音频文件")
+    print(f"删除了 {deleted_count} 个不符合时长要求的音频文件")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="删除指定目录下短于指定时长的音频文件")
+    parser = argparse.ArgumentParser(description="删除指定目录下短于或长于指定时长的音频文件")
     parser.add_argument("directory", help="要检查的目录路径")
-    parser.add_argument("--min-duration", type=int, default=2000, 
-                       help="最短音频时长（毫秒），默认2000ms")
+    parser.add_argument("--min-duration", type=int, default=5000, 
+                       help="最短音频时长（毫秒），默认5000ms")
+    parser.add_argument("--max-duration", type=int, default=45000,
+                       help="最长音频时长（毫秒），默认45000ms")
     
     args = parser.parse_args()
     
     print(f"开始检查目录: {args.directory}")
     print(f"最短时长阈值: {args.min_duration}ms")
+    print(f"最长时长阈值: {args.max_duration}ms")
     print("-" * 50)
     
-    delete_short_audio_files(args.directory, args.min_duration)
+    delete_short_and_long_audio_files(args.directory, args.min_duration, args.max_duration)
