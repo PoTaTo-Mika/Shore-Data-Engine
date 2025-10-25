@@ -4,18 +4,26 @@
 export LC_ALL=C.UTF-8
 
 # 检查参数
-if [ $# -eq 0 ]; then
-    echo "用法: $0 <目录路径> [并发线程数]"
+if [ $# -lt 1 ]; then
+    echo "用法: $0 <目录路径> [输出格式] [并发线程数]"
+    echo "输出格式: opus (默认) 或 wav"
     echo "默认并发线程数: 4"
     exit 1
 fi
 
 DIR="$1"
-THREADS="${2:-4}"  # 默认4个线程
+FORMAT="${2:-opus}"  # 默认opus格式
+THREADS="${3:-4}"    # 默认4个线程
 
 # 检查目录是否存在
 if [ ! -d "$DIR" ]; then
     echo "错误: 目录 '$DIR' 不存在"
+    exit 1
+fi
+
+# 检查输出格式是否有效
+if [[ "$FORMAT" != "opus" && "$FORMAT" != "wav" ]]; then
+    echo "错误: 输出格式必须是 'opus' 或 'wav'"
     exit 1
 fi
 
@@ -29,6 +37,7 @@ fi
 ABS_DIR=$(realpath "$DIR")
 
 echo "将在绝对路径下查找并转换文件: $ABS_DIR"
+echo "输出格式: $FORMAT"
 echo "使用并发线程数: $THREADS"
 
 # 创建临时目录用于进程控制
@@ -48,16 +57,28 @@ done
 convert_file() {
     local file="$1"
     local basename="${file%.*}"
+    local format="$2"
     
     echo "转换: $file"
     
-    # 转换为Opus格式，使用libopus编码器，设置音频质量
-    if ffmpeg -nostdin -i "$file" -c:a libopus -b:a 128k -vbr on -y "$basename.opus" 2>/dev/null; then
-        echo "完成: $basename.opus"
-        rm "$file"
-        echo "已删除源文件: $file"
+    if [ "$format" = "opus" ]; then
+        # 转换为Opus格式，使用libopus编码器，设置音频质量
+        if ffmpeg -nostdin -i "$file" -c:a libopus -b:a 128k -vbr on -y "$basename.opus" 2>/dev/null; then
+            echo "完成: $basename.opus"
+            rm "$file"
+            echo "已删除源文件: $file"
+        else
+            echo "转换失败，保留源文件: $file"
+        fi
     else
-        echo "转换失败，保留源文件: $file"
+        # 转换为WAV格式，使用PCM编码
+        if ffmpeg -nostdin -i "$file" -c:a pcm_s16le -y "$basename.wav" 2>/dev/null; then
+            echo "完成: $basename.wav"
+            rm "$file"
+            echo "已删除源文件: $file"
+        else
+            echo "转换失败，保留源文件: $file"
+        fi
     fi
 }
 
@@ -71,7 +92,7 @@ find "$ABS_DIR" -type f \( -iname "*.mp3" -o -iname "*.flac" -o -iname "*.m4a" -
 while IFS= read -r -d '' file; do
     read -u 3  # 从信号量读取
     {
-        convert_file "$file"
+        convert_file "$file" "$FORMAT"
         echo >&3  # 释放信号量
     } &
 done

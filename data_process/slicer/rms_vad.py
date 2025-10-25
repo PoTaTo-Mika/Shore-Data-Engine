@@ -1,7 +1,11 @@
 import numpy as np
-# This script is copied from https://github.com/openvpi/audio-slicer
-# Follows MIT License
-
+import librosa
+import soundfile
+import os
+from tqdm import tqdm
+from concurrent.futures import ProcessPoolExecutor
+# for those audio without much noise
+# From OpenVPI's audio slicer.
 # This function is obtained from librosa.
 def get_rms(
     y,
@@ -140,48 +144,68 @@ class Slicer:
                 chunks.append(self._apply_slice(waveform, sil_tags[-1][1], total_frames))
             return chunks
 
-
-def main():
-    import os.path
-    from argparse import ArgumentParser
-
-    import librosa
-    import soundfile
-
-    parser = ArgumentParser()
-    parser.add_argument('audio', type=str, help='The audio to be sliced')
-    parser.add_argument('--out', type=str, help='Output directory of the sliced audio clips')
-    parser.add_argument('--db_thresh', type=float, required=False, default=-40,
-                        help='The dB threshold for silence detection')
-    parser.add_argument('--min_length', type=int, required=False, default=5000,
-                        help='The minimum milliseconds required for each sliced audio clip')
-    parser.add_argument('--min_interval', type=int, required=False, default=300,
-                        help='The minimum milliseconds for a silence part to be sliced')
-    parser.add_argument('--hop_size', type=int, required=False, default=10,
-                        help='Frame length in milliseconds')
-    parser.add_argument('--max_sil_kept', type=int, required=False, default=500,
-                        help='The maximum silence length kept around the sliced clip, presented in milliseconds')
-    args = parser.parse_args()
-    out = args.out
-    if out is None:
-        out = os.path.dirname(os.path.abspath(args.audio))
-    audio, sr = librosa.load(args.audio, sr=None, mono=False)
+def process_audio(audio_path, output_dir):
+    # 在子进程内构造 slicer，避免对象跨进程序列化问题
     slicer = Slicer(
-        sr=sr,
-        threshold=args.db_thresh,
-        min_length=args.min_length,
-        min_interval=args.min_interval,
-        hop_size=args.hop_size,
-        max_sil_kept=args.max_sil_kept
+        sr=44100,
+        threshold=-30,
+        min_length=10000,  # 10s
+        min_interval=500,  # 500ms
+        hop_size=10,
+        max_sil_kept=500,
     )
-    chunks = slicer.slice(audio)
-    if not os.path.exists(out):
-        os.makedirs(out)
+
+    # get audio name
+    audio_name = os.path.basename(audio_path).split('.')[0]
+    waveform, sr = librosa.load(audio_path, sr=44100)
+    chunks = slicer.slice(waveform)
+
+    # Create sliced directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+
     for i, chunk in enumerate(chunks):
         if len(chunk.shape) > 1:
-            chunk = chunk.T
-        soundfile.write(os.path.join(out, f'%s_%d.wav' % (os.path.basename(args.audio).rsplit('.', maxsplit=1)[0], i)), chunk, sr)
+            chunk = chunk.T  # Swap axes if the audio is stereo.
+        soundfile.write(os.path.join(output_dir, f'{audio_name}_{i}.wav'), chunk, sr)  # Save sliced audio files with soundfile.
 
+
+def _process_single(args):
+    audio_path, output_dir = args
+    process_audio(audio_path, output_dir)
+
+def process_folder(folder_path, max_workers=None):
+    # 收集所有音频文件，递归处理子目录
+    audio_files = []
+    for root, dirs, files in os.walk(folder_path):
+        for file in files:
+            if file.endswith('.wav'):
+                audio_files.append(os.path.join(root, file))
+    
+    print(f"找到 {len(audio_files)} 个音频文件需要处理")
+    
+    # 为每个音频文件计算输出目录并并发处理
+    tasks = []
+    for audio_file in audio_files:
+        # 获取相对于根目录的路径，确定输出目录
+        rel_path = os.path.relpath(audio_file, folder_path)
+        audio_dir = os.path.dirname(rel_path)
+
+        if audio_dir:  # 如果在子目录中
+            output_dir = os.path.join(folder_path, audio_dir, 'sliced')
+        else:  # 如果直接在根目录中
+            output_dir = os.path.join(folder_path, 'sliced')
+
+        tasks.append((audio_file, output_dir))
+
+    if max_workers is None:
+        try:
+            max_workers = os.cpu_count() or 1
+        except Exception:
+            max_workers = 1
+
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        list(tqdm(executor.map(_process_single, tasks), total=len(tasks), desc="切片处理音频文件"))
 
 if __name__ == '__main__':
-    main()
+    folder_path = 'data'
+    process_folder(folder_path)

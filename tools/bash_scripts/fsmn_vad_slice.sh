@@ -2,16 +2,16 @@
 
 # ============================================
 # 音频批量切分脚本 (基于VAD时间戳)
+# 修改版：在每个子文件夹内创建sliced目录
 # ============================================
 
 set -euo pipefail
 
 # ==================== 配置参数 ====================
 INPUT_DIR="${1:-./data}"
-OUTPUT_DIR="${2:-./data/sliced}"
-PARALLEL_JOBS="${3:-32}"        # 并行任务数
-OUTPUT_FORMAT="${4:-}"          # 输出格式(留空保持原格式)
-DELETE_ORIGINAL="${5:-true}"   # 是否删除原文件
+PARALLEL_JOBS="${2:-32}"        # 并行任务数
+OUTPUT_FORMAT="${3:-}"          # 输出格式(留空保持原格式)
+DELETE_ORIGINAL="${4:-true}"   # 是否删除原文件
 
 # ==================== 颜色输出 ====================
 RED='\033[0;31m'
@@ -109,18 +109,11 @@ process_single_audio() {
         return 0
     fi
     
-    # 计算输出目录 - 保持原始目录结构
+    # 计算输出目录 - 在音频文件所在目录创建sliced子目录
     local audio_dir
     audio_dir=$(dirname "$audio_path")
     
-    local relative_dir="${audio_dir#$INPUT_DIR}"
-    relative_dir="${relative_dir#/}"
-    
-    local current_output_dir="$OUTPUT_DIR"
-    if [ -n "$relative_dir" ]; then
-        current_output_dir="$OUTPUT_DIR/$relative_dir"
-    fi
-    
+    local current_output_dir="$audio_dir/sliced"
     mkdir -p "$current_output_dir"
     
     # 获取基础文件名和扩展名
@@ -183,7 +176,7 @@ process_single_audio() {
     
     # 检查是否全部成功
     if [ "$success_count" -eq "$timestamp_count" ]; then
-        log_success "切分完成: $audio_path ($success_count 段)"
+        log_success "切分完成: $audio_path ($success_count 段) -> $current_output_dir"
         
         # 删除原文件(如果指定)
         if [ "$DELETE_ORIGINAL" = "true" ]; then
@@ -206,13 +199,13 @@ export -f log_info
 export -f log_success
 export -f log_warning
 export -f log_error
-export INPUT_DIR OUTPUT_DIR OUTPUT_FORMAT DELETE_ORIGINAL
+export OUTPUT_FORMAT DELETE_ORIGINAL
 export RED GREEN YELLOW BLUE NC
 
 # ==================== 主函数 ====================
 main() {
     log_info "======================================"
-    log_info "音频批量切分脚本"
+    log_info "音频批量切分脚本 (子文件夹版)"
     log_info "======================================"
     
     # 检查依赖
@@ -220,15 +213,14 @@ main() {
     
     # 规范化路径
     INPUT_DIR="${INPUT_DIR%/}"
-    OUTPUT_DIR="${OUTPUT_DIR%/}"
     
     # 显示配置
     log_info "配置信息:"
     log_info "  输入目录: $INPUT_DIR"
-    log_info "  输出目录: $OUTPUT_DIR"
     log_info "  并行任务数: $PARALLEL_JOBS"
     log_info "  输出格式: ${OUTPUT_FORMAT:-保持原格式}"
     log_info "  删除原文件: $DELETE_ORIGINAL"
+    log_info "  输出方式: 在每个子文件夹内创建 sliced/ 目录"
     
     # 查找所有有时间戳的音频文件
     log_info "正在扫描音频文件..."
@@ -249,6 +241,17 @@ main() {
     fi
     
     log_info "找到 $total_files 个待处理文件"
+    
+    # 显示文件夹结构预览
+    log_info "检测到的子文件夹:"
+    local folders=()
+    for audio_file in "${audio_files[@]}"; do
+        local folder=$(dirname "$audio_file")
+        if [[ ! " ${folders[@]} " =~ " ${folder} " ]]; then
+            folders+=("$folder")
+            log_info "  - $folder (将创建 sliced/ 子目录)"
+        fi
+    done
     
     # 创建临时文件列表
     local temp_file_list
@@ -293,7 +296,18 @@ main() {
     fi
     log_info "总耗时: ${duration}秒"
     log_info "处理文件数: $total_files"
-    log_info "输出目录: $OUTPUT_DIR"
+    log_info "输出位置: 各子文件夹的 sliced/ 目录"
+    log_info "======================================"
+    
+    # 显示输出目录摘要
+    log_info "切片输出目录列表:"
+    for folder in "${folders[@]}"; do
+        local sliced_dir="$folder/sliced"
+        if [ -d "$sliced_dir" ]; then
+            local slice_count=$(find "$sliced_dir" -type f | wc -l)
+            log_info "  - $sliced_dir ($slice_count 个切片)"
+        fi
+    done
     log_info "======================================"
     
     return $exit_code
@@ -303,30 +317,54 @@ main() {
 show_usage() {
     cat << EOF
 使用方法:
-    $0 [输入目录] [输出目录] [并行数] [输出格式] [删除原文件]
+    $0 [输入目录] [并行数] [输出格式] [删除原文件]
 
 参数说明:
-    输入目录      : 包含音频文件和.timestamp文件的目录 (默认: ./data)
-    输出目录      : 切分后音频的输出目录 (默认: ./data/sliced)
+    输入目录      : 主文件夹路径，包含多个子文件夹 (默认: ./data)
     并行数        : 并行处理的任务数 (默认: 32)
     输出格式      : 输出音频格式,如 wav/mp3/opus (默认: 保持原格式)
     删除原文件    : true/false, 是否删除原始文件 (默认: false)
+
+文件夹结构:
+    输入:
+        data/
+        ├── audio_album1/
+        │   ├── song1.mp3
+        │   ├── song1.mp3.timestamp
+        │   └── song2.mp3
+        └── album2/
+            └── audio.wav
+
+    输出:
+        data/
+        ├── audio_album1/
+        │   ├── song1.mp3 (可选保留)
+        │   ├── song1.mp3.timestamp (可选保留)
+        │   ├── song2.mp3
+        │   └── sliced/
+        │       ├── song1_0000.mp3
+        │       ├── song1_0001.mp3
+        │       └── ...
+        └── album2/
+            ├── audio.wav
+            └── sliced/
+                └── audio_0000.wav
 
 示例:
     # 使用默认参数
     $0
 
-    # 指定输入输出目录
-    $0 ./input ./output
+    # 指定输入目录
+    $0 ./my_data
 
     # 指定并行数
-    $0 ./input ./output 64
+    $0 ./data 64
 
     # 转换为opus格式
-    $0 ./data ./data/sliced 32 opus false
+    $0 ./data 32 opus
 
-    # 保持原格式并删除原文件
-    $0 ./data ./data/sliced 32 "" true
+    # 转换为opus并删除原文件
+    $0 ./data 32 opus true
 
 依赖:
     - ffmpeg: 音频处理
