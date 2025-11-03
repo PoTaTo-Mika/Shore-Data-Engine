@@ -88,7 +88,7 @@ export -f convert_file
 echo "开始查找音频文件..."
 
 # 查找所有音频文件并并行处理
-find "$ABS_DIR" -type f \( -iname "*.mp3" -o -iname "*.flac" -o -iname "*.m4a" -o -iname "*.aac" -o -iname "*.ogg" -o -iname "*.wma" \) -print0 | \
+find "$ABS_DIR" -type f \( -iname "*.mp3" -o -iname "*.flac" -o -iname "*.m4a" -o -iname "*.aac" -o -iname "*.ogg" -o -iname "*.wma" -o -iname "*.wav" \) -print0 | \
 while IFS= read -r -d '' file; do
     read -u 3  # 从信号量读取
     {

@@ -6,6 +6,13 @@ import platform
 from tqdm import tqdm
 from pathlib import Path
 
+# 一定要加！！！！
+os.environ['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
+
+# 设置根目录
+ROOT_DIR = Path(__file__).parent.parent.parent
+os.chdir(ROOT_DIR)
+
 # 配置logging
 # 确保logs目录存在
 os.makedirs('logs', exist_ok=True)
@@ -18,13 +25,61 @@ logging.basicConfig(
     ]
 )
 
+#################辅助函数#################
+
+def get_audio_duration(audio_path):
+    """获取音频文件时长（秒）"""
+    try:
+        import librosa
+        audio_data, sample_rate = librosa.load(str(audio_path), sr=None, duration=None)
+        duration = len(audio_data) / sample_rate
+        return duration
+    except Exception as e:
+        logging.error(f"Error getting duration for {audio_path}: {e}")
+        return None
+
+import concurrent.futures
+
+def filter_audio_files_by_duration(audio_files, max_duration=30, min_duration=0, max_workers=None):
+
+    def process_file(audio_file):
+        duration = get_audio_duration(audio_file)
+        if duration is not None:
+            if min_duration <= duration and (max_duration is None or duration <= max_duration):
+                logging.debug(f"File {audio_file.name}: {duration:.2f}s - included")
+                return audio_file, duration, True
+            else:
+                logging.debug(f"File {audio_file.name}: {duration:.2f}s - excluded")
+        return audio_file, duration, False
+    
+    filtered_files = []
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # 提交所有任务
+        future_to_file = {executor.submit(process_file, file): file for file in audio_files}
+        
+        # 使用tqdm显示进度
+        for future in tqdm(concurrent.futures.as_completed(future_to_file), 
+                          total=len(audio_files), 
+                          desc="Filtering audio by duration", 
+                          unit="file"):
+            try:
+                audio_file, duration, included = future.result()
+                if included:
+                    filtered_files.append(audio_file)
+            except Exception as e:
+                file_name = future_to_file[future].name
+                logging.warning(f"Error processing {file_name}: {e}")
+    
+    return filtered_files
+
 #################基础转写#################
 
 def process_audio(audio_path, model):
     result = model.transcribe(str(audio_path))  # 确保路径是字符串格式
     return result['text']
 
-def process_into_list(folder):
+def process_into_list(folder, duration_filter=None):
 
     audio_extensions = ['.mp3', '.wav', '.m4a', '.ogg', '.flac', '.aac', '.wma', '.webm', '.opus']
     
@@ -47,7 +102,13 @@ def process_into_list(folder):
         if audio_file.is_file() and audio_file.suffix.lower() in audio_extensions:
             audio_files.append(audio_file)
     
-    logging.info(f"Found {len(audio_files)} audio files to process")
+    logging.info(f"Found {len(audio_files)} audio files in total")
+    
+    # 根据时长过滤音频文件
+    if duration_filter is not None:
+        min_dur, max_dur = duration_filter
+        audio_files = filter_audio_files_by_duration(audio_files, max_duration=max_dur, min_duration=min_dur)
+        logging.info(f"After duration filtering ({min_dur}s-{max_dur if max_dur else 'inf'}s): {len(audio_files)} files to process")
     
     # 使用tqdm显示进度
     for audio_file in tqdm(audio_files, desc="Processing audio files", unit="file"):
@@ -86,7 +147,8 @@ def process_into_list(folder):
 
 #################VLLM加速推理#################
 
-def process_into_list_vllm(folder):
+def process_into_list_vllm(folder, max_duration=30):
+
     try:
         # 在函数内部导入vllm相关模块，避免Windows环境问题
         import time
@@ -119,7 +181,7 @@ def process_into_list_vllm(folder):
             model="openai/whisper-large-v3",
             max_model_len=448,
             max_num_seqs=400,
-            kv_cache_dtype="fp8",
+            kv_cache_dtype="auto",
             download_dir="./checkpoints"
         )
         logging.info("VLLM Whisper model loaded successfully")
@@ -135,15 +197,19 @@ def process_into_list_vllm(folder):
     )
 
     # 先收集所有音频文件
-    audio_files = []
+    all_audio_files = []
     for audio_file in folder_path.rglob('*'):
         if audio_file.is_file() and audio_file.suffix.lower() in audio_extensions:
-            audio_files.append(audio_file)
+            all_audio_files.append(audio_file)
     
-    logging.info(f"Found {len(audio_files)} audio files to process with VLLM")
+    logging.info(f"Found {len(all_audio_files)} audio files in total")
+    
+    # 只处理时长小于max_duration的音频文件
+    audio_files = filter_audio_files_by_duration(all_audio_files, max_duration=max_duration)
+    logging.info(f"Found {len(audio_files)} audio files <= {max_duration}s to process with VLLM")
     
     # 批量处理音频文件
-    batch_size = 32  # 可以根据GPU内存调整批次大小
+    batch_size = 256  # 可以根据GPU内存调整批次大小
     
     for i in tqdm(range(0, len(audio_files), batch_size), desc="Processing batches", unit="batch"):
         batch_files = audio_files[i:i+batch_size]
@@ -233,27 +299,45 @@ if __name__ == "__main__":
         # 查找所有名为 sliced 的目录
         return [p for p in root_path.rglob('sliced') if p.is_dir()]
 
-    def _process_all_sliced(root_dir: str, use_vllm: bool = False):
+    def _process_all_sliced(root_dir: str, use_vllm: bool = False, duration_filter=None):
+
         sliced_dirs = _iter_sliced_dirs(root_dir)
         logging.info(f"Found {len(sliced_dirs)} 'sliced' directories under {root_dir}")
         for sliced_dir in sliced_dirs:
             logging.info(f"Processing sliced directory: {sliced_dir}")
             if use_vllm:
-                process_into_list_vllm(str(sliced_dir))
+                # VLLM只处理30秒以内的音频
+                process_into_list_vllm(str(sliced_dir), max_duration=30)
             else:
-                process_into_list(str(sliced_dir))
+                # 基础Whisper根据duration_filter处理
+                process_into_list(str(sliced_dir), duration_filter=duration_filter)
 
-    # 选择使用基础Whisper还是VLLM加速推理，对所有 sliced 目录执行
-    use_vllm = False  # 设置为True使用VLLM，False使用基础Whisper
+    # 两阶段处理流程
+    use_vllm = True  # 第一阶段使用VLLM
 
+    # 检查系统平台
     if use_vllm and platform.system() != "Linux":
         print(f"警告：vLLM仅支持Linux平台，当前系统为 {platform.system()}")
         print("自动切换到基础Whisper进行转录...")
         use_vllm = False
 
     if use_vllm:
-        print("使用VLLM加速推理进行转录...")
+        print("=" * 60)
+        print("第一阶段：使用VLLM加速推理处理短音频（≤30秒）...")
+        print("=" * 60)
+        _process_all_sliced(data_root, use_vllm=True)
+        
+        print("\n" + "=" * 60)
+        print("第二阶段：使用基础Whisper处理长音频（>30秒）...")
+        print("=" * 60)
+        # 第二阶段：处理30秒以上的音频
+        _process_all_sliced(data_root, use_vllm=False, duration_filter=(30, None))
     else:
-        print("使用基础Whisper进行转录...")
-
-    _process_all_sliced(data_root, use_vllm)
+        print("=" * 60)
+        print("使用基础Whisper进行转录（所有音频）...")
+        print("=" * 60)
+        _process_all_sliced(data_root, use_vllm=False)
+    
+    print("\n" + "=" * 60)
+    print("所有音频处理完成！")
+    print("=" * 60)

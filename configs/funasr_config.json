@@ -2,5 +2,6 @@
   "num_gpus": 8,
   "num_mega_batches": 10,
   "batch_size": 16,
-  "data_root": "data"
+  "data_root": "data",
+  "lang": "zh"
 }
