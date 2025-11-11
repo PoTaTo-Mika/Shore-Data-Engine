@@ -88,19 +88,9 @@ def load_audio(audio_path: str) -> Tuple[torch.Tensor, int, str]:
     
     # 如果是原生WAV，直接读取
     if ext == '.wav':
-        try:
-            audio_data, samplerate = sf.read(audio_path)
-            audio_tensor = torch.from_numpy(audio_data.T).float()
-            return audio_tensor, samplerate, 'wav'
-        except Exception as e:
-            logging.warning(f"Failed to read WAV directly: {e}, trying FFmpeg conversion")
-            # 如果直接读取失败，尝试用FFmpeg转换
-            wav_buffer = audio_to_wav_memory(audio_path)
-            wav_buffer.seek(0)
-            audio_data, samplerate = sf.read(wav_buffer)
-            wav_buffer.close()
-            audio_tensor = torch.from_numpy(audio_data.T).float()
-            return audio_tensor, samplerate, 'wav'
+        audio_data, samplerate = sf.read(audio_path)
+        audio_tensor = torch.from_numpy(audio_data.T).float()
+        return audio_tensor, samplerate, 'wav'
     
     # 如果是Opus
     if ext == '.opus':
@@ -122,16 +112,16 @@ def load_audio(audio_path: str) -> Tuple[torch.Tensor, int, str]:
 def get_output_path(input_path: str, format_type: str) -> str:
     """
     根据输入格式确定输出路径
-    - wav -> wav (保持原格式，覆盖原文件)
-    - opus -> opus (保持原格式，覆盖原文件)
+    - wav -> wav (保持原格式)
+    - opus -> opus (保持原格式)
     - other -> opus (转换为opus)
     """
     base_name = os.path.splitext(input_path)[0]
     
     if format_type == 'wav':
-        return input_path  # 保持原WAV路径（会覆盖）
+        return input_path  # 保持原WAV路径
     elif format_type == 'opus':
-        return input_path  # 保持原Opus路径（会覆盖）
+        return input_path  # 保持原Opus路径
     else:
         return base_name + '.opus'  # 其他格式转为Opus
 
@@ -140,31 +130,20 @@ def save_audio(vocals_tensor: torch.Tensor, samplerate: int, output_path: str, f
     保存音频文件
     - wav: 直接保存为WAV（覆盖原文件）
     - opus: 内存转码保存为Opus（覆盖原文件）
-    - other: 内存转码保存为Opus（新文件）
+    - other: 内存转码保存为Opus
     """
     vocals_np = vocals_tensor.cpu().numpy().T
     
-    # 原生WAV：直接保存为WAV
+    # 原生WAV：直接保存为WAV（覆盖）
     if format_type == 'wav':
-        # 先保存到临时文件，再替换原文件（避免写入失败导致原文件损坏）
-        temp_path = output_path + '.tmp'
-        sf.write(temp_path, vocals_np, samplerate, format='WAV', subtype='FLOAT')
-        os.replace(temp_path, output_path)
-        logging.info(f"Saved as WAV (overwritten): {output_path}")
+        sf.write(output_path, vocals_np, samplerate, format='WAV', subtype='PCM_16')
         return
     
     # Opus或其他格式：内存转码为Opus
     wav_buffer = BytesIO()
-    sf.write(wav_buffer, vocals_np, samplerate, format='WAV', subtype='FLOAT')
-    
-    # 先保存到临时文件
-    temp_path = output_path + '.tmp'
-    wav_memory_to_opus(wav_buffer, temp_path)
+    sf.write(wav_buffer, vocals_np, samplerate, format='WAV', subtype='PCM_16')
+    wav_memory_to_opus(wav_buffer, output_path)
     wav_buffer.close()
-    
-    # 替换原文件
-    os.replace(temp_path, output_path)
-    logging.info(f"Saved as Opus: {output_path}")
 
 def process_audio(audio_path: str, separator: demucs.api.Separator):
     """处理单个音频文件"""
@@ -188,7 +167,7 @@ def process_audio(audio_path: str, separator: demucs.api.Separator):
         # 如果是其他格式转为Opus，需要删除原文件
         should_delete_original = (format_type == 'other' and output_path != audio_path)
         
-        # 保存结果
+        # 保存结果（直接覆盖）
         save_audio(vocals_tensor, samplerate, output_path, format_type)
         
         # 删除原文件（如果需要）
@@ -198,13 +177,7 @@ def process_audio(audio_path: str, separator: demucs.api.Separator):
         
         # 标记完成（使用输出路径）
         mark_as_finished(output_path)
-        
-        if format_type == 'wav':
-            logging.info(f"Successfully processed WAV (overwritten): {audio_path}")
-        elif format_type == 'opus':
-            logging.info(f"Successfully processed Opus (overwritten): {audio_path}")
-        else:
-            logging.info(f"Successfully processed: {audio_path} -> {output_path}")
+        logging.info(f"Successfully processed: {audio_path} -> {output_path}")
             
     except Exception:
         logging.exception(f"Failed to process: {audio_path}")

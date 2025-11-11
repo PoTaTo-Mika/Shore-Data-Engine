@@ -9,7 +9,7 @@ import multiprocessing as mp
 from typing import List, Dict
 import math
 from datetime import datetime
-
+from tools.calculate_time import calculate_time as cct
 # 配置日志
 os.makedirs('logs', exist_ok=True)
 logging.basicConfig(
@@ -326,3 +326,6 @@ if __name__ == "__main__":
     
     duration = datetime.now() - start_time
     logging.info(f"Total processing time: {duration}")
+
+    from tools.calculate_time import calculate_time as cct
+    cct(DATA_ROOT)

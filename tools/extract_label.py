@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 from typing import Dict, Iterable
+import shutil
 
 # Vibe coding with GPT-5
 
@@ -45,6 +46,40 @@ def write_text_label_for_audio(audio_path: Path, text: str, preferred_filename: 
     label_path = audio_dir / label_name
     label_path.write_text(text.strip() + "\n", encoding='utf-8')
     return label_path
+
+
+def get_album_name(sliced_dir: Path) -> str:
+    """从 sliced 目录路径中提取专辑名称"""
+    # 假设路径结构为: data/{album_name}/sliced
+    parent_dir = sliced_dir.parent
+    return parent_dir.name if parent_dir != sliced_dir else "unknown"
+
+
+def move_transcription_json(sliced_dir: Path, target_dir: Path) -> None:
+    """移动并重命名 transcription.json 文件"""
+    json_path = sliced_dir / 'transcription.json'
+    if not json_path.exists():
+        return
+    
+    album_name = get_album_name(sliced_dir)
+    # 生成新的文件名，防止冲突
+    new_filename = f"transcription_{album_name}.json"
+    target_path = target_dir / new_filename
+    
+    # 如果目标文件已存在，添加数字后缀
+    counter = 1
+    original_target = target_path
+    while target_path.exists():
+        stem = original_target.stem
+        target_path = original_target.parent / f"{stem}_{counter}.json"
+        counter += 1
+    
+    # 创建目标目录（如果不存在）
+    target_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 移动文件
+    shutil.move(str(json_path), str(target_path))
+    print(f"[extract_label] 已移动 transcription.json -> {target_path}")
 
 
 def process_one_sliced_dir(sliced_dir: Path) -> None:
@@ -94,8 +129,17 @@ def main():
         print("[extract_label] 未找到任何 'sliced' 目录")
         return
 
+    # 创建目标目录
+    target_dir = data_root / 'transcription'
+    
+    # 先处理所有标签提取
     for sliced_dir in sliced_dirs:
         process_one_sliced_dir(sliced_dir)
+    
+    # 然后移动所有 transcription.json 文件
+    print("\n[extract_label] 开始移动 transcription.json 文件...")
+    for sliced_dir in sliced_dirs:
+        move_transcription_json(sliced_dir, target_dir)
 
 
 if __name__ == '__main__':

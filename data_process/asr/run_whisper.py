@@ -137,13 +137,8 @@ def process_into_list(folder, duration_filter=None):
             logging.error(f"Overcome Error: {e} with {audio_file}")
             # 然后我们就不添加进去了
 
-    from tools.calculate_time import calculate_time
-
-    total_duration = calculate_time(folder_path)
-
     logging.info(f"Transcription saved to {json_output_path}")
     logging.info(f"Total {len(transcription_pairs)} files processed")
-    logging.info(f"Total duration: {total_duration/3600:.2f} hours")
 
 #################VLLM加速推理#################
 
@@ -281,14 +276,9 @@ def process_into_list_vllm(folder, max_duration=30):
             continue
 
     # 计算总时长
-    from tools.calculate_time import calculate_time
-    total_duration = calculate_time(folder_path)
 
     logging.info(f"VLLM transcription saved to {json_output_path}")
     logging.info(f"Total {len(transcription_pairs)} files processed")
-    logging.info(f"Total duration: {total_duration/3600:.2f} hours")
-
-
 
 if __name__ == "__main__":
     # 新增：遍历 data 下所有包含 sliced 的专辑目录，并在各自 sliced 目录生成 transcription.json
@@ -341,3 +331,6 @@ if __name__ == "__main__":
     print("\n" + "=" * 60)
     print("所有音频处理完成！")
     print("=" * 60)
+
+    from tools.calculate_time import calculate_time as cct
+    cct(data_root)
