@@ -12,8 +12,8 @@ if [ $# -lt 1 ]; then
 fi
 
 DIR="$1"
-FORMAT="${2:-opus}"  # 默认opus格式
-THREADS="${3:-4}"    # 默认4个线程
+FORMAT="${2:-opus}"
+THREADS="${3:-4}"
 
 # 检查目录是否存在
 if [ ! -d "$DIR" ]; then
@@ -33,7 +33,6 @@ if ! [[ "$THREADS" =~ ^[0-9]+$ ]] || [ "$THREADS" -lt 1 ]; then
     exit 1
 fi
 
-# 使用 realpath 将输入目录转换为绝对路径，避免所有相对路径问题
 ABS_DIR=$(realpath "$DIR")
 
 echo "将在绝对路径下查找并转换文件: $ABS_DIR"
@@ -62,7 +61,6 @@ convert_file() {
     echo "转换: $file"
     
     if [ "$format" = "opus" ]; then
-        # 转换为Opus格式，使用libopus编码器，设置音频质量
         if ffmpeg -nostdin -i "$file" -c:a libopus -b:a 128k -vbr on -y "$basename.opus" 2>/dev/null; then
             echo "完成: $basename.opus"
             rm "$file"
@@ -71,7 +69,6 @@ convert_file() {
             echo "转换失败，保留源文件: $file"
         fi
     else
-        # 转换为WAV格式，使用PCM编码
         if ffmpeg -nostdin -i "$file" -c:a pcm_s16le -y "$basename.wav" 2>/dev/null; then
             echo "完成: $basename.wav"
             rm "$file"
@@ -82,23 +79,22 @@ convert_file() {
     fi
 }
 
-# 导出函数以便在子shell中使用
 export -f convert_file
 
 echo "开始查找音频文件..."
 
-# 查找所有音频文件并并行处理
-find "$ABS_DIR" -type f \( -iname "*.mp3" -o -iname "*.flac" -o -iname "*.m4a" -o -iname "*.aac" -o -iname "*.ogg" -o -iname "*.wma" -o -iname "*.wav" \) -print0 | \
+# 使用进程替换而不是管道，避免子shell问题
 while IFS= read -r -d '' file; do
-    read -u 3  # 从信号量读取
+    read -u 3
     {
         convert_file "$file" "$FORMAT"
-        echo >&3  # 释放信号量
+        echo >&3
     } &
-done
+done < <(find "$ABS_DIR" -type f \( -iname "*.mp3" -o -iname "*.flac" -o -iname "*.m4a" -o -iname "*.aac" -o -iname "*.ogg" -o -iname "*.wma" -o -iname "*.wav" \) -print0)
 
 # 等待所有后台任务完成
 wait
-exec 3>&-  # 关闭文件描述符
+
+exec 3>&-
 
 echo "所有转换任务完成！"

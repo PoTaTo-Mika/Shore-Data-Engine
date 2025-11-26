@@ -3,13 +3,11 @@
 
 # 将所有的音频全部转换为wav格式
 echo "Start converting..."
-bash tools/bash_scripts/audio_transcode.sh wav 16
+bash tools/bash_scripts/audio_transcode.sh data wav 16
 
 # 进行demucs处理
 echo "Start demucs..."
 python -m data_process.uvr.run_demucs
-
-# 把data目录下的所有.finish给去掉。
 
 # 开始切分
 echo "Start slicing..."
@@ -23,6 +21,9 @@ python -m data_process.asr.run_funasr
 
 # 最后提取label为一个个小文件
 python tools/extract_label.py
+
+# 转码回opus
+bash tools/bash_scripts/audio_transcode.sh data opus 16
 
 # 检查data目录
 # 归档并切分每个子目录下的 sliced 结果（固定每卷 10G）
