@@ -69,7 +69,7 @@ convert_file() {
             echo "转换失败，保留源文件: $file"
         fi
     else
-        if ffmpeg -nostdin -i "$file" -c:a pcm_s16le -y "$basename.wav" 2>/dev/null; then
+        if ffmpeg -nostdin -i "$file" -c:a pcm_s16le -ac 2 -y "$basename.wav" 2>/dev/null; then
             echo "完成: $basename.wav"
             rm "$file"
             echo "已删除源文件: $file"
