@@ -7,7 +7,7 @@ import hashlib
 import os
 import re
 from urllib.parse import urlparse, parse_qs
-from get_name import get_name
+from crawl_tools.get_name import get_name
 
 # 配置logging，使其能在终端显示INFO级别的日志
 logging.basicConfig(
