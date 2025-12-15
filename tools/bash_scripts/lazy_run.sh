@@ -1,17 +1,12 @@
 # 懒狗脚本已一键配置
 # bash tools/bash_scripts/lazy_run.sh
-
-# 将所有的音频全部转换为wav格式
-echo "Start converting..."
-bash tools/bash_scripts/audio_transcode.sh data wav 16
-
 # 进行demucs处理
 echo "Start demucs..."
 python -m data_process.uvr.run_demucs
 
 # 开始切分
 echo "Start slicing..."
-python -m data_process.slicer.rms_vad
+python -m data_process.slicer.silero_vad_
 # python -m data_process.fsmn_vad
 
 # 开始asr处理
@@ -21,9 +16,6 @@ python -m data_process.asr.run_funasr
 
 # 最后提取label为一个个小文件
 python tools/extract_label.py
-
-# 转码回opus
-bash tools/bash_scripts/audio_transcode.sh data opus 16
 
 # 检查data目录
 # 归档并切分每个子目录下的 sliced 结果（固定每卷 10G）
@@ -66,3 +58,6 @@ for first_part in "$UPDATE_DIR"/*.tar.000; do
 done
 echo "Done. Albums are in $UPDATE_DIR/<album>/<album>.tar.000..."
 
+export HF_ENDPOINT=https://hf-mirror.com
+
+hf upload PoTaTo721/Shore-Lunch-box ./data/update TTS/Chinese/mandarin --repo-type=dataset
