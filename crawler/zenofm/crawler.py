@@ -26,6 +26,15 @@ def sanitize_filename(filename):
     safe_name = re.sub(r'[\\/*?:"<>|]', "", filename)
     # 替换连续空格
     safe_name = re.sub(r'\s+', " ", safe_name)
+    
+    # 新增：限制文件名长度（保留扩展名）
+    max_length = 50  # 设置合理的最大长度
+    if len(safe_name) > max_length:
+        # 保留扩展名
+        name, ext = os.path.splitext(safe_name)
+        # 截断文件名主体，保留扩展名
+        safe_name = name[:max_length - len(ext)] + ext
+    
     return safe_name.strip()
 
 def download_simple(url, filepath):
@@ -113,6 +122,13 @@ def process_podcast(podcast_info, language_path):
     # 有些专辑名可能太长，截断一下防止系统报错
     album_dir = os.path.join(language_path, safe_title[:100])
     
+    # 新增：检查完整路径长度是否超限
+    max_path_length = 200  # 预留空间给文件名
+    if len(album_dir) > max_path_length:
+        # 如果专辑目录路径已经太长，进一步截断
+        excess = len(album_dir) - max_path_length
+        album_dir = os.path.join(language_path, safe_title[:100 - excess])
+    
     if not os.path.exists(album_dir):
         os.makedirs(album_dir)
 
@@ -124,6 +140,9 @@ def process_podcast(podcast_info, language_path):
     
     offset = 0
     download_count = 0
+    
+    # 新增：用于跟踪已使用的文件名，防止重复
+    used_filenames = {}
     
     while True:
         # 构造参数
@@ -157,9 +176,48 @@ def process_podcast(podcast_info, language_path):
                 
                 # 文件名: 标题.mp3
                 ep_filename = sanitize_filename(ep_title) + ".mp3"
-                filepath = os.path.join(album_dir, ep_filename)
                 
-                print(f"    文件: {ep_filename[:50]}...") # 只打印前50个字符
+                # 新增：检查完整文件路径长度
+                full_path = os.path.join(album_dir, ep_filename)
+                if len(full_path) > 250:  # Windows路径限制260，留10字符余量
+                    # 如果路径太长，进一步截断文件名
+                    available_length = 250 - len(album_dir) - 1  # -1 for path separator
+                    if available_length > 10:  # 至少保留10个字符
+                        name_without_ext, ext = os.path.splitext(ep_filename)
+                        truncated_name = name_without_ext[:available_length - len(ext)]
+                        ep_filename = truncated_name + ext
+                    else:
+                        # 如果连基本文件名都放不下，使用序号
+                        ep_filename = f"episode_{download_count + 1}.mp3"
+                
+                # 新增：处理文件名重复
+                base_name, ext = os.path.splitext(ep_filename)
+                final_filename = ep_filename
+                counter = 1
+                
+                # 检查文件名是否已存在（包括已下载的和计划下载的）
+                while final_filename in used_filenames or os.path.exists(os.path.join(album_dir, final_filename)):
+                    # 如果文件名已存在，添加后缀
+                    final_filename = f"{base_name}_{counter:02d}{ext}"
+                    counter += 1
+                    
+                    # 如果添加后缀后路径太长，需要再次截断
+                    if len(os.path.join(album_dir, final_filename)) > 250:
+                        # 计算可用的基础名称长度
+                        available_for_base = 250 - len(album_dir) - 1 - len(f"_{counter:02d}{ext}")
+                        if available_for_base > 5:  # 至少保留5个字符
+                            base_name = base_name[:available_for_base]
+                            final_filename = f"{base_name}_{counter:02d}{ext}"
+                        else:
+                            # 如果连5个字符都放不下，使用序号命名
+                            final_filename = f"episode_{download_count + 1}_{counter:02d}.mp3"
+                
+                # 记录已使用的文件名
+                used_filenames[final_filename] = True
+                
+                filepath = os.path.join(album_dir, final_filename)
+                
+                print(f"    文件: {final_filename[:50]}...") # 只打印前50个字符
                 download_simple(media_url, filepath)
                 download_count += 1
             
@@ -171,7 +229,7 @@ def process_podcast(podcast_info, language_path):
             break
             
     print(f"<-- 专辑处理完毕，共处理 {download_count} 个文件。\n")
-
+    
 ################### 主程序 ###################
 
 def main():
