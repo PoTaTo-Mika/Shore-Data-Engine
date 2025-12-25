@@ -215,3 +215,4 @@ logs/*.log
 */*.data
 .cursor
 .vscode
+demucs/

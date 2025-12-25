@@ -5,6 +5,7 @@ import logging
 import platform
 from tqdm import tqdm
 from pathlib import Path
+import torch
 
 # 一定要加！！！！
 os.environ['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
@@ -174,6 +175,7 @@ def process_into_list_vllm(folder, max_duration=30):
     try:
         llm = LLM(
             model="openai/whisper-large-v3",
+            tensor_parallel_size=torch.cuda.device_count(),
             max_model_len=448,
             max_num_seqs=400,
             kv_cache_dtype="auto",
