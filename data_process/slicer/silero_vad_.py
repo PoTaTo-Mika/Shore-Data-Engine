@@ -114,8 +114,8 @@ def process_audio(audio_path, output_dir):
         merged_timestamps = merge_segments(
             speech_timestamps, 
             min_duration=5.0, 
-            target_duration=12.0,
-            max_gap=0.8
+            target_duration=10.0,
+            max_gap=0.4
         )
         
         if not merged_timestamps:
