@@ -5,7 +5,7 @@ import numpy as np
 from concurrent.futures import ProcessPoolExecutor
 from tqdm import tqdm
 import warnings
-import subprocess  # 新增：用于调用 ffmpeg
+import subprocess
 import shutil
 
 warnings.filterwarnings("ignore")
@@ -15,27 +15,54 @@ vad_model = None
 vad_utils = None
 # ===========================================
 
-def merge_segments(segments, min_duration=5.0, target_duration=10.0, max_gap=1.5):
+def merge_segments(segments, min_duration=3.0, target_duration=15.0, max_duration=60.0, strict_gap=0.5, loose_gap=2.0):
     """
-    保持原有的合并逻辑不变
+    重写后的合并逻辑，专为 TTS 数据集优化。
+    
+    参数:
+    - min_duration: 最小保留时长，小于这个长度的孤立片段会被丢弃（除非它被合并）。
+    - target_duration: 期望的理想时长 (约 15s)。
+    - max_duration: 硬性最大时长 (约 60s)，防止 OOM。
+    - strict_gap: 当片段已经够长(>target)时，只有静音小于此值才继续合并 (倾向于切分)。
+    - loose_gap: 当片段还太短(<target)时，只要静音小于此值就允许合并 (倾向于凑长)。
     """
     if not segments:
         return []
 
     merged = []
+    # 初始化当前片段
     current_seg = {'start': segments[0]['start'], 'end': segments[0]['end']}
 
     for i in range(1, len(segments)):
         next_seg = segments[i]
+        
+        # 计算当前时长和间隙
         current_dur = current_seg['end'] - current_seg['start']
         gap = next_seg['start'] - current_seg['end']
+        next_dur = next_seg['end'] - next_seg['start']
+        
+        # 预测合并后的总时长
+        potential_dur = current_dur + gap + next_dur
         
         should_merge = False
-        if current_dur < min_duration:
-            if gap < 2.0: 
+
+        # --- 核心判断逻辑 ---
+        
+        # 1. 如果合并后超过硬性上限 (60s)，绝对不合并 -> 强制切分
+        if potential_dur > max_duration:
+            should_merge = False
+        
+        # 2. 如果当前还未达到目标长度 (15s)，且静音在允许范围内 (loose_gap)，尝试合并
+        elif current_dur < target_duration:
+            if gap < loose_gap:
                 should_merge = True
-        elif (current_dur + (next_seg['end'] - next_seg['start'])) < target_duration and gap < max_gap:
-            should_merge = True
+        
+        # 3. 如果已经超过目标长度 (15s)，但还在最大长度 (60s) 内
+        #    此时变得“挑剔”，只有静音非常短 (strict_gap) 才合并（也就是连贯语气）
+        #    否则就在这里切开，保持在 15s 左右
+        else:
+            if gap < strict_gap:
+                should_merge = True
 
         if should_merge:
             current_seg['end'] = next_seg['end']
@@ -44,7 +71,11 @@ def merge_segments(segments, min_duration=5.0, target_duration=10.0, max_gap=1.5
             current_seg = {'start': next_seg['start'], 'end': next_seg['end']}
 
     merged.append(current_seg)
-    return merged
+    
+    # 最后过滤掉极其短的碎片 (可选)
+    final_merged = [s for s in merged if (s['end'] - s['start']) >= 1.0]
+    
+    return final_merged
 
 def init_worker(local_repo_path):
     global vad_model, vad_utils
@@ -61,15 +92,11 @@ def init_worker(local_repo_path):
         raise e
 
 def ffmpeg_slice(input_path, output_path, start_time, end_time):
-    """
-    使用 FFmpeg 进行无损流式切分 (-c copy)
-    """
+    # 计算持续时间
     duration = end_time - start_time
-    # -ss: 开始时间, -t: 持续时间, -c copy: 直接复制流不重编码, -y: 覆盖输出
-    # -avoid_negative_ts make_zero: 修正时间戳，防止播放器识别错误
     cmd = [
         'ffmpeg', 
-        '-nostdin', '-hide_banner', '-loglevel', 'error', # 静默模式
+        '-nostdin', '-hide_banner', '-loglevel', 'error',
         '-ss', f"{start_time:.3f}",
         '-t', f"{duration:.3f}",
         '-i', input_path,
@@ -78,12 +105,10 @@ def ffmpeg_slice(input_path, output_path, start_time, end_time):
         '-y',
         output_path
     ]
-    
     try:
         subprocess.run(cmd, check=True)
         return True
     except subprocess.CalledProcessError:
-        # print(f"FFmpeg 切分失败: {input_path}")
         return False
 
 def process_audio(audio_path, output_dir):
@@ -96,11 +121,9 @@ def process_audio(audio_path, output_dir):
     
     try:
         # 1. 准备 VAD 音频
-        # silero 的 read_audio 支持大多数 ffmpeg 能读的格式 (opus, ogg, mp3 等)
-        # 它会在内存中解码为 PCM Tensor，无需中间文件
         wav_vad = read_audio(audio_path, sampling_rate=16000)
         
-        # 2. 获取时间戳
+        # 2. 获取时间戳 (VAD 本身只负责找有没有人说话)
         speech_timestamps = get_speech_timestamps(
             wav_vad, 
             vad_model, 
@@ -110,12 +133,14 @@ def process_audio(audio_path, output_dir):
             min_silence_duration_ms=500 
         )
         
-        # 3. 合并
+        # 3. 合并 (使用新的逻辑和参数)
         merged_timestamps = merge_segments(
             speech_timestamps, 
-            min_duration=5.0, 
-            target_duration=10.0,
-            max_gap=0.4
+            min_duration=3.0,     # 最小允许 3秒
+            target_duration=15.0, # 理想目标 15秒
+            max_duration=60.0,    # 最大限制 60秒
+            strict_gap=0.2,       # 超过15s后，如果停顿超过0.3s就切分
+            loose_gap=1.5         
         )
         
         if not merged_timestamps:
@@ -123,19 +148,15 @@ def process_audio(audio_path, output_dir):
 
         os.makedirs(output_dir, exist_ok=True)
         
-        # 获取文件名和扩展名
         file_name = os.path.basename(audio_path)
         name_part, ext_part = os.path.splitext(file_name)
         ext_part = ext_part.lower()
         
-        # 判断是否为无损格式 (可以直接由 Python 库处理) 或 有损格式 (建议 FFmpeg 处理)
-        # WAV 和 FLAC 是无损的，可以直接读写 numpy 数组
         is_lossless_format = ext_part in ['.wav', '.flac']
         
         data = None
         sr = None
         
-        # 只有在需要 Python 切分时才读取全量音频
         if is_lossless_format:
             data, sr = sf.read(audio_path)
         
@@ -145,15 +166,14 @@ def process_audio(audio_path, output_dir):
             start_sec = seg['start']
             end_sec = seg['end']
             
-            # 过滤太短的片段
-            if (end_sec - start_sec) < 1.0:
+            # 双重保险：过滤太短的片段（小于1.5秒通常无法用于TTS）
+            if (end_sec - start_sec) < 1.5:
                 continue
 
             save_name = f"{name_part}_{str(i).zfill(3)}{ext_part}"
             save_path = os.path.join(output_dir, save_name)
             
             if is_lossless_format:
-                # ====== 策略 A: 内存切分 (适用于 Wav/Flac) ======
                 start_sample = int(start_sec * sr)
                 end_sample = int(end_sec * sr)
                 start_sample = max(0, start_sample)
@@ -163,13 +183,10 @@ def process_audio(audio_path, output_dir):
                 sf.write(save_path, chunk, sr)
                 saved_count += 1
             else:
-                # ====== 策略 B: FFmpeg 无损流拷贝 (适用于 Opus/Mp3/Ogg) ======
-                # 直接调用 FFmpeg 对原文件进行剪切
                 success = ffmpeg_slice(audio_path, save_path, start_sec, end_sec)
                 if success:
                     saved_count += 1
         
-        # 6. 删除原始文件
         if saved_count > 0:
             try:
                 os.remove(audio_path)
@@ -187,13 +204,14 @@ def process_folder_recursive(root_folder, max_workers=None):
     tasks = []
     print("正在扫描音频文件...")
     
-    # 扩展支持的格式列表
     valid_extensions = ('.wav', '.mp3', '.flac', '.opus', '.ogg', '.m4a', '.aac')
     
     for root, dirs, files in os.walk(root_folder):
         for file in files:
             if file.lower().endswith(valid_extensions):
                 full_path = os.path.join(root, file)
+                if 'sliced' in root.split(os.sep): 
+                    continue
                 output_dir = os.path.join(root, 'sliced')
                 tasks.append((full_path, output_dir))
     
@@ -201,13 +219,9 @@ def process_folder_recursive(root_folder, max_workers=None):
     if not tasks:
         return
 
-    # 检查 FFmpeg 是否存在
     if shutil.which("ffmpeg") is None:
-        print("\n[错误] 未检测到 FFmpeg！处理非 Wav/Flac 格式需要 FFmpeg。")
-        print("请安装 FFmpeg 并添加到环境变量，或者只处理 Wav 文件。\n")
-        # 这里可以选择 return 退出，或者继续尝试
+        print("\n[注意] 未检测到 FFmpeg！非 Wav/Flac 文件可能无法正确处理。\n")
     
-    # ================= 准备本地模型路径 (保持不变) =================
     print("正在检查并下载模型到本地缓存...")
     try:
         torch.hub.load(repo_or_dir='snakers4/silero-vad', model='silero_vad', trust_repo=True)
@@ -222,13 +236,13 @@ def process_folder_recursive(root_folder, max_workers=None):
         if candidates:
             local_repo_path = os.path.join(hub_dir, candidates[0])
         else:
-            raise FileNotFoundError(f"未找到 Silero 模型缓存。")
+            # 如果本地实在没有，这里可能会报错，建议第一次运行联网
+            pass
     
-    print(f"使用本地模型路径: {local_repo_path}")
-    # ==========================================================
+    print(f"使用模型路径: {local_repo_path}")
 
     if max_workers is None:
-        max_workers = max(1, 16)
+        max_workers = max(1, os.cpu_count() - 2) # 保留一点 CPU
     
     print(f"开始处理，使用 {max_workers} 个进程...")
     
@@ -236,5 +250,6 @@ def process_folder_recursive(root_folder, max_workers=None):
         list(tqdm(executor.map(_process_single_wrapper, tasks), total=len(tasks), unit="file"))
 
 if __name__ == '__main__':
-    DATA_DIR = 'data'
+    # 将这里修改为你的数据目录
+    DATA_DIR = r'data' 
     process_folder_recursive(DATA_DIR)

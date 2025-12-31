@@ -245,7 +245,7 @@ def process_stage_1_vllm(all_sliced_dirs):
             data = {}
             
         # 找文件
-        files = [p for p in folder_path.rglob('*') if p.suffix.lower() in ['.mp3','.wav','.m4a','.flac'] and p.is_file()]
+        files = [p for p in folder_path.rglob('*') if p.suffix.lower() in ['.mp3','.wav','.m4a','.opus'] and p.is_file()]
         targets = [f for f in files if str(f.absolute()) not in data]
         
         # 过滤短音频 (<=30s)
