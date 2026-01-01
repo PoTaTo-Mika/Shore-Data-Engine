@@ -2,362 +2,386 @@ import os
 import json
 import logging
 import platform
-import gc
-import math
-import multiprocessing
-import concurrent.futures
-from pathlib import Path
-from tqdm import tqdm
+import threading
 import torch
-from faster_whisper import WhisperModel
+import gc
+from tqdm import tqdm
+from pathlib import Path
+import concurrent.futures
+from queue import Queue
+try:
+    from faster_whisper import WhisperModel
+except ImportError:
+    logging.warning("faster_whisper not found. Please install via 'pip install faster-whisper'")
 
-# ================= 配置与初始化 =================
-# 必须设置为 spawn，否则 VLLM 和 CTranslate2 会冲突
-if __name__ == "__main__":
-    try:
-        multiprocessing.set_start_method('spawn', force=True)
-    except RuntimeError:
-        pass
-
+# 一定要加！！！！
 os.environ['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
-# 限制每个进程内的 CPU 线程数，防止多显卡进程争抢 CPU 导致死锁或变慢
-os.environ["OMP_NUM_THREADS"] = "1"
+# 某些环境下Faster Whisper配合多线程需要设置
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 # 设置根目录
 ROOT_DIR = Path(__file__).parent.parent.parent
-try:
-    os.chdir(ROOT_DIR)
-except:
-    pass
+os.chdir(ROOT_DIR)
 
-# 配置 logging
+# 配置logging
 os.makedirs('logs', exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - [Process:%(processName)s] - %(levelname)s - %(message)s',
+    format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
         logging.FileHandler('logs/whisper_transcription.log', encoding='utf-8')
     ]
 )
 
-################# 辅助函数 #################
-
-def clear_gpu_memory():
-    """强制清理 GPU 显存"""
-    logging.info("Cleaning GPU memory & Garbage Collection...")
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.ipc_collect()
+#################辅助函数#################
 
 def get_audio_duration(audio_path):
-    """获取音频文件时长（秒），优先读取元数据"""
+    """获取音频文件时长（秒）"""
     try:
         import librosa
-        # 仅读取头部元数据，速度快
+        # 仅加载头部元数据，加快速度
         duration = librosa.get_duration(path=str(audio_path))
         return duration
-    except Exception:
+    except Exception as e:
+        # fallback
         try:
-            # 失败兜底
             import librosa
-            y, sr = librosa.load(str(audio_path), sr=None)
-            return len(y) / sr
-        except Exception as e:
-            logging.error(f"Error getting duration for {audio_path}: {e}")
+            audio_data, sample_rate = librosa.load(str(audio_path), sr=None, duration=None)
+            duration = len(audio_data) / sample_rate
+            return duration
+        except Exception as e2:
+            logging.error(f"Error getting duration for {audio_path}: {e2}")
             return None
 
 def filter_audio_files_by_duration(audio_files, max_duration=30, min_duration=0, max_workers=None):
-    """多线程并发检查文件时长"""
+    # 保持原有逻辑不变
     def process_file(audio_file):
         duration = get_audio_duration(audio_file)
         if duration is not None:
             if min_duration <= duration and (max_duration is None or duration <= max_duration):
-                return audio_file
-        return None
+                return audio_file, duration, True
+        return audio_file, duration, False
     
     filtered_files = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # 提交任务
-        futures = {executor.submit(process_file, f): f for f in audio_files}
-        # 获取结果
-        for future in concurrent.futures.as_completed(futures):
-            res = future.result()
-            if res:
-                filtered_files.append(res)
-    
+        future_to_file = {executor.submit(process_file, file): file for file in audio_files}
+        for future in tqdm(concurrent.futures.as_completed(future_to_file), 
+                          total=len(audio_files), 
+                          desc="Filtering audio by duration", 
+                          unit="file"):
+            try:
+                audio_file, duration, included = future.result()
+                if included:
+                    filtered_files.append(audio_file)
+            except Exception as e:
+                logging.warning(f"Error processing {future_to_file[future].name}: {e}")
     return filtered_files
 
-################# Stage 2: 基础转写 (多进程 Worker) #################
+################# Faster-Whisper 多卡转写 (替代原基础转写) #################
 
-def process_single_folder_basic(folder, model, device_id, duration_filter=None):
+def process_into_list(folder, duration_filter=None):
     """
-    单个文件夹的处理逻辑 (运行在子进程中)
+    使用 Faster-Whisper 进行多GPU并行转写，具备低幻觉参数配置。
     """
     audio_extensions = ['.mp3', '.wav', '.m4a', '.ogg', '.flac', '.aac', '.wma', '.webm', '.opus']
     folder_path = Path(folder)
     json_output_path = folder_path / "transcription.json"
     
-    # 1. 加载或初始化 JSON
+    # 加载现有数据
     if json_output_path.exists():
-        try:
-            with open(json_output_path, "r", encoding='utf-8') as f:
-                transcription_pairs = json.load(f)
-        except:
-            transcription_pairs = {}
+        with open(json_output_path, "r", encoding='utf-8') as f:
+            transcription_pairs = json.load(f)
+        logging.info(f"Loaded existing transcription data with {len(transcription_pairs)} entries")
     else:
         transcription_pairs = {}
 
-    # 2. 扫描文件
-    all_files = [p for p in folder_path.rglob('*') if p.is_file() and p.suffix.lower() in audio_extensions]
+    # 1. 收集和过滤文件
+    all_audio_files = []
+    for audio_file in folder_path.rglob('*'):
+        if audio_file.is_file() and audio_file.suffix.lower() in audio_extensions:
+            all_audio_files.append(audio_file)
     
-    # 3. 筛选未处理的文件
-    files_to_process = [f for f in all_files if str(f.absolute()) not in transcription_pairs]
-    
-    # 4. 如果有时长过滤需求（比如只处理 >30s 的）
-    # 注意：为了效率，建议先不做时长检查，因为文件可能很多。
-    # 这里根据 logic: 如果之前 VLLM 跑过了，理论上 json 里已经有了。
-    # 这里主要处理剩下的。为了保险，我们可以在循环里做简单的 check。
-    
-    if not files_to_process:
+    # 排除已处理的文件
+    audio_files_to_process = []
+    for f in all_audio_files:
+        if str(f.absolute()) not in transcription_pairs:
+            audio_files_to_process.append(f)
+        else:
+            logging.debug(f"Skipping {f.name} (already done)")
+
+    if not audio_files_to_process:
+        logging.info("No new files to process.")
         return
 
-    logging.info(f"[GPU-{device_id}] Processing {folder_path.name}: {len(files_to_process)} new files")
+    # 应用时长过滤
+    if duration_filter is not None:
+        min_dur, max_dur = duration_filter
+        logging.info(f"Filtering {len(audio_files_to_process)} files by duration ({min_dur}-{max_dur})...")
+        audio_files_to_process = filter_audio_files_by_duration(audio_files_to_process, max_duration=max_dur, min_duration=min_dur)
+    
+    logging.info(f"Total files to process with Faster-Whisper: {len(audio_files_to_process)}")
 
-    for audio_file in files_to_process:
+    # 2. 多GPU Worker 设置
+    gpu_count = torch.cuda.device_count()
+    if gpu_count == 0:
+        logging.warning("No GPU detected, falling back to CPU (slow).")
+        gpu_indices = [-1] # CPU
+    else:
+        gpu_indices = list(range(gpu_count))
+        logging.info(f"Detected {gpu_count} GPUs. Launching workers...")
+
+    # 线程安全的写锁
+    write_lock = threading.Lock()
+    file_queue = Queue()
+    for f in audio_files_to_process:
+        file_queue.put(f)
+
+    # 进度条
+    pbar = tqdm(total=len(audio_files_to_process), desc="Faster-Whisper Processing", unit="file")
+
+    def worker_func(gpu_id):
+        """每个Worker在一个独立的GPU上加载模型并处理队列"""
+        device = "cuda" if gpu_id >= 0 else "cpu"
+        device_index = gpu_id if gpu_id >= 0 else 0
+        
         try:
-            # 再次检查时长（可选，视性能需求而定）
-            # 如果 duration_filter 存在，我们在这里做检查，避免读取大量无效文件
-            if duration_filter:
-                dur = get_audio_duration(audio_file)
-                min_d, max_d = duration_filter
-                if dur is None: continue
-                if dur < min_d: continue
-                if max_d is not None and dur > max_d: continue
+            # 加载模型：large-v3-turbo
+            # float16=True 可以在GPU上节省显存并加速
+            logging.info(f"[GPU {gpu_id}] Loading Faster-Whisper model...")
+            model = WhisperModel(
+                "large-v3-turbo", 
+                device=device, 
+                device_index=device_index, 
+                compute_type="float16",
+                download_root='./checkpoints/whisper-large-v3-turbo'
+            )
+        except Exception as e:
+            logging.error(f"[GPU {gpu_id}] Failed to load model: {e}")
+            return
+
+        while not file_queue.empty():
+            try:
+                audio_file = file_queue.get(block=False)
+            except Exception:
+                break # 队列空了
 
             audio_path = str(audio_file.absolute())
             
-            # === Faster-Whisper 推理 ===
-            # 抗幻觉参数集
-            segments, info = model.transcribe(
-                audio_path,
-                beam_size=5,
-                vad_filter=True, # 关键：过滤静音
-                vad_parameters=dict(min_silence_duration_ms=500),
-                condition_on_previous_text=False, # 关键：防止死循环
-                repetition_penalty=1.2, # 关键：防止复读机
-                temperature=[0.0, 0.2] 
-            )
+            try:
+                # --- 低幻觉参数配置 ---
+                # vad_filter=True: 过滤静音，防止对静音进行幻觉翻译
+                # condition_on_previous_text=False: 防止之前的错误累积导致循环
+                # temperature=0: 使用贪婪解码，最稳定
+                segments, info = model.transcribe(
+                    audio_path,
+                    beam_size=5,
+                    best_of=5,
+                    temperature=0,
+                    condition_on_previous_text=False, 
+                    vad_filter=True,
+                    vad_parameters=dict(min_silence_duration_ms=500), # 激进一点的VAD
+                    word_timestamps=False
+                )
+                
+                # Faster-whisper返回的是generator，必须遍历才能执行
+                text_segments = [segment.text for segment in segments]
+                full_text = "".join(text_segments).strip()
 
-            text_segments = [segment.text for segment in segments]
-            transcription_text = "".join(text_segments).strip()
+                # 线程安全写入
+                with write_lock:
+                    transcription_pairs[audio_path] = full_text
+                    # 每处理一个就保存（虽然频繁IO，但安全）
+                    with open(json_output_path, "w", encoding='utf-8') as f:
+                        json.dump(transcription_pairs, f, ensure_ascii=False, indent=2)
+                
+                pbar.update(1)
+                logging.debug(f"[GPU {gpu_id}] Processed {audio_file.name}")
 
-            transcription_pairs[audio_path] = transcription_text
+            except Exception as e:
+                logging.error(f"[GPU {gpu_id}] Error processing {audio_file.name}: {e}")
+                pbar.update(1) # 即使失败也要更新进度条
+                continue
 
-            # 实时保存（防止崩溃丢失）
-            with open(json_output_path, "w", encoding='utf-8') as f:
-                json.dump(transcription_pairs, f, ensure_ascii=False, indent=2)
+    # 3. 启动线程池
+    # 为什么用Thread而不是Process？
+    # Faster-Whisper底层是CTranslate2 (C++)，它会释放GIL，因此多线程可以有效利用多卡。
+    # 相比多进程，多线程共享内存开销小，启动快。
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(gpu_indices)) as executor:
+        futures = [executor.submit(worker_func, gpu_id) for gpu_id in gpu_indices]
+        concurrent.futures.wait(futures)
 
-        except Exception as e:
-            logging.error(f"[GPU-{device_id}] Error in {audio_file.name}: {e}")
+    pbar.close()
+    logging.info(f"Faster-Whisper Transcription saved to {json_output_path}")
 
-def worker_basic_process(sliced_dirs, gpu_id):
-    """
-    Stage 2 的工作进程入口
-    """
-    device_str = f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu"
-    logging.info(f"Worker launched on {device_str} for {len(sliced_dirs)} folders.")
-    
+################# VLLM加速推理 #################
+
+def process_into_list_vllm(folder, max_duration=30):
     try:
-        # 在进程内加载模型，指定 device_index
-        # 使用 float16 提升速度
-        compute_type = "float16"
-        
-        model = WhisperModel(
-            "large-v3", 
-            device="cuda" if torch.cuda.is_available() else "cpu",
-            device_index=gpu_id, 
-            compute_type=compute_type,
-            download_root='./checkpoints/whisper-large-v3'
-        )
-        
-        # 遍历分配给该进程的文件夹列表
-        for idx, folder in enumerate(sliced_dirs):
-            process_single_folder_basic(folder, model, gpu_id, duration_filter=(30, None))
-            
-            if (idx + 1) % 5 == 0:
-                gc.collect() # 定期清理 Python 垃圾
-
-    except Exception as e:
-        logging.error(f"Worker {gpu_id} failed: {e}")
-    finally:
-        logging.info(f"Worker {gpu_id} finished.")
-
-################# Stage 1: VLLM 加速推理 #################
-
-def process_stage_1_vllm(all_sliced_dirs):
-    """
-    使用 VLLM 处理短音频。
-    VLLM 本身使用 Tensor Parallelism (占用所有卡运行一个实例)，
-    所以这里不需要多进程，直接单进程跑即可。
-    """
-    try:
+        import time
         from vllm import LLM, SamplingParams
         import librosa
-        from vllm.distributed.parallel_state import destroy_model_parallel
-    except ImportError:
-        logging.error("VLLM not installed.")
+    except ImportError as e:
+        logging.error(f"Failed to import VLLM modules: {e}")
         return
-
-    logging.info("Initializing VLLM for Stage 1 (Short Audio)...")
     
-    # 初始化 VLLM (占用所有 GPU)
+    audio_extensions = ['.mp3', '.wav', '.m4a', '.ogg', '.flac', '.aac', '.wma', '.webm', '.opus']
+    folder_path = Path(folder)
+    json_output_path = folder_path / "transcription.json"
+    
+    if json_output_path.exists():
+        with open(json_output_path, "r", encoding='utf-8') as f:
+            transcription_pairs = json.load(f)
+        logging.info(f"Loaded existing VLLM transcription data with {len(transcription_pairs)} entries")
+    else:
+        transcription_pairs = {}
+
+    # 加载模型
     try:
+        logging.info("Loading VLLM Whisper model...")
         llm = LLM(
             model="openai/whisper-large-v3",
-            tensor_parallel_size=torch.cuda.device_count(), # 占满所有卡
-            max_model_len=448,
-            max_num_seqs=256,
-            gpu_memory_utilization=0.9,
+            tensor_parallel_size=torch.cuda.device_count(),
+            max_model_len=448, # 限制上下文长度防止OOM
+            max_num_seqs=200,  # 稍微调低以增加稳定性
+            enforce_eager=False,
             download_dir="./checkpoints"
         )
     except Exception as e:
-        logging.error(f"VLLM Init Failed: {e}")
+        logging.error(f"Failed to load VLLM model: {e}")
         return
 
-    sampling_params = SamplingParams(temperature=0, top_p=1.0, max_tokens=200)
+    # --- Prompt 和 采样参数修正 ---
+    sampling_params = SamplingParams(
+        temperature=0,
+        top_p=1.0,
+        max_tokens=200,
+        skip_special_tokens=True, # 尝试在解码层跳过
+    )
+
+    # 收集文件
+    all_audio_files = []
+    for audio_file in folder_path.rglob('*'):
+        if audio_file.is_file() and audio_file.suffix.lower() in audio_extensions:
+            all_audio_files.append(audio_file)
     
-    # 收集所有任务
-    # 为了提高 VLLM 效率，我们可以跨文件夹收集所有短文件做成一个巨大的 Batch
-    # 但为了保证断点续传的 JSON 写入安全，还是按文件夹粒度处理比较稳妥，或者按 batch 写入
+    # 过滤未处理且时长符合的文件
+    files_to_process = []
+    for f in all_audio_files:
+        if str(f.absolute()) not in transcription_pairs:
+            files_to_process.append(f)
     
-    # 这里简化逻辑：遍历所有文件夹，把没做的短音频挑出来
-    for folder in tqdm(all_sliced_dirs, desc="VLLM Processing Directories"):
-        folder_path = Path(folder)
-        json_path = folder_path / "transcription.json"
-        
-        # 读取现有进度
-        if json_path.exists():
-            with open(json_path, "r", encoding='utf-8') as f:
-                data = json.load(f)
-        else:
-            data = {}
-            
-        # 找文件
-        files = [p for p in folder_path.rglob('*') if p.suffix.lower() in ['.mp3','.wav','.m4a','.opus'] and p.is_file()]
-        targets = [f for f in files if str(f.absolute()) not in data]
-        
-        # 过滤短音频 (<=30s)
-        # 注意：这里是单线程过滤，如果文件巨多可能会慢，但通常 sliced 文件夹内文件不会特别多
+    audio_files = filter_audio_files_by_duration(files_to_process, max_duration=max_duration)
+    logging.info(f"VLLM Processing: {len(audio_files)} new files (<= {max_duration}s)")
+    
+    batch_size = 256
+    
+    for i in tqdm(range(0, len(audio_files), batch_size), desc="VLLM Batches", unit="batch"):
+        batch_files = audio_files[i:i+batch_size]
         batch_prompts = []
-        batch_paths = []
+        batch_file_paths = []
         
-        for f in targets:
+        for audio_file in batch_files:
             try:
-                # 快速检查时长
-                if get_audio_duration(f) <= 30.0: # 稍微放宽一点点
-                    y, sr = librosa.load(str(f), sr=16000)
-                    batch_prompts.append({
-                        "prompt": "<|startoftranscript|>",
-                        "multi_modal_data": {"audio": (y, sr)},
-                    })
-                    batch_paths.append(str(f.absolute()))
-            except:
-                pass
+                audio_path = str(audio_file.absolute())
+                audio_data, sample_rate = librosa.load(str(audio_file), sr=16000)
+                
+                # --- Prompt 修正: 添加 <|notimestamps|> ---
+                # VLLM Whisper通常使用特殊的Prompt格式来控制行为
+                # 加入 <|notimestamps|> 可以有效抑制 <|0.00|> 的输出
+                prompt_content = "<|startoftranscript|><|notimestamps|>"
+                
+                prompt = {
+                    "prompt": prompt_content,
+                    "multi_modal_data": {
+                        "audio": (audio_data, sample_rate),
+                    },
+                }
+                
+                batch_prompts.append(prompt)
+                batch_file_paths.append(audio_path)
+            except Exception as e:
+                logging.error(f"Error preparing {audio_file}: {e}")
         
         if not batch_prompts:
             continue
             
-        # 推理
         try:
-            outputs = llm.generate(batch_prompts, sampling_params, use_tqdm=False)
+            start_time = time.time()
+            outputs = llm.generate(batch_prompts, sampling_params)
             
-            # 更新结果
-            for i, out in enumerate(outputs):
-                data[batch_paths[i]] = out.outputs[0].text.strip()
+            for idx, output in enumerate(outputs):
+                if idx < len(batch_file_paths):
+                    audio_path = batch_file_paths[idx]
+                    # strip() 有助于去掉可能残留的空白
+                    generated_text = output.outputs[0].text.strip()
+                    transcription_pairs[audio_path] = generated_text
             
-            # 写入
-            with open(json_path, "w", encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            with open(json_output_path, "w", encoding='utf-8') as f:
+                json.dump(transcription_pairs, f, ensure_ascii=False, indent=2)
                 
         except Exception as e:
-            logging.error(f"VLLM Error in {folder.name}: {e}")
+            logging.error(f"Error during VLLM inference: {e}")
+            continue
 
-    # === 清理 VLLM ===
-    logging.info("Stage 1 Complete. Destroying VLLM instance...")
-    destroy_model_parallel()
+    logging.info(f"VLLM finished. Total files: {len(transcription_pairs)}")
+    
+    # --- 显存清理 ---
+    # VLLM 占用显存非常厉害，必须手动清理以供后续 Faster-Whisper 使用
+    logging.info("Cleaning up VLLM resources...")
+    from vllm.distributed.parallel_state import destroy_model_parallel
+    try:
+        destroy_model_parallel()
+    except:
+        pass
     del llm
-    clear_gpu_memory()
+    gc.collect()
+    torch.cuda.empty_cache()
+    logging.info("GPU cache cleared.")
 
 ################# 主流程 #################
 
-def main():
-    data_root = "data"
-    all_sliced_dirs = [p for p in Path(data_root).rglob('sliced') if p.is_dir()]
-    
-    if not all_sliced_dirs:
-        logging.warning("No 'sliced' directories found!")
-        return
-
-    # ================= Stage 1: VLLM (Short Audio) =================
-    # 只有 Linux 且有卡才跑 VLLM
-    run_vllm = platform.system() == "Linux" and torch.cuda.is_available()
-    
-    if run_vllm:
-        print("\n" + "="*60)
-        print("STAGE 1: VLLM Processing (Using ALL GPUs as one unit)")
-        print("="*60)
-        process_stage_1_vllm(all_sliced_dirs)
-    else:
-        logging.info("Skipping VLLM (Not Linux or No GPU).")
-
-    # ================= Stage 2: Faster-Whisper (Long/Remaining) =================
-    # 使用多进程，每张卡跑一个 Worker
-    print("\n" + "="*60)
-    print("STAGE 2: Faster-Whisper (Multi-GPU Processing)")
-    print("="*60)
-
-    num_gpus = torch.cuda.device_count()
-    if num_gpus == 0:
-        num_workers = 1
-        logging.warning("No GPU detected. Using 1 CPU worker.")
-    else:
-        num_workers = num_gpus
-        logging.info(f"Spawning {num_workers} workers for {num_workers} GPUs.")
-
-    # 任务分配算法：把文件夹列表切分成 num_workers 份
-    chunks = [[] for _ in range(num_workers)]
-    for i, d in enumerate(all_sliced_dirs):
-        chunks[i % num_workers].append(d)
-
-    processes = []
-    for i in range(num_workers):
-        if not chunks[i]: continue
-        
-        # 启动进程
-        # i 对应 gpu_id
-        p = multiprocessing.Process(
-            target=worker_basic_process,
-            args=(chunks[i], i),
-            name=f"Worker-GPU-{i}"
-        )
-        p.start()
-        processes.append(p)
-
-    # 等待所有进程结束
-    for p in processes:
-        p.join()
-
-    print("\n" + "="*60)
-    print("ALL PROCESSING DONE.")
-    print("="*60)
-
-    try:
-        from tools.calculate_time import calculate_time as cct
-        cct(data_root)
-    except:
-        pass
-
 if __name__ == "__main__":
-    main()
+    data_root = "data"
+
+    def _iter_sliced_dirs(root_dir: str):
+        root_path = Path(root_dir)
+        return [p for p in root_path.rglob('sliced') if p.is_dir()]
+
+    def _process_all_sliced(root_dir: str, use_vllm: bool = False, duration_filter=None):
+        sliced_dirs = _iter_sliced_dirs(root_dir)
+        logging.info(f"Found {len(sliced_dirs)} 'sliced' directories")
+        
+        for sliced_dir in sliced_dirs:
+            logging.info(f"Processing directory: {sliced_dir}")
+            if use_vllm:
+                process_into_list_vllm(str(sliced_dir), max_duration=30)
+            else:
+                process_into_list(str(sliced_dir), duration_filter=duration_filter)
+
+    # 流程控制
+    use_vllm = True
+    
+    if use_vllm and platform.system() != "Linux":
+        print(f"警告：vLLM仅支持Linux平台，当前系统为 {platform.system()}")
+        use_vllm = False
+
+    if use_vllm:
+        print("=" * 60)
+        print("第一阶段：VLLM (Short Audio <= 30s) + <|notimestamps|> fix")
+        print("=" * 60)
+        _process_all_sliced(data_root, use_vllm=True)
+        
+        print("\n" + "=" * 60)
+        print("第二阶段：Faster-Whisper Multi-GPU (Long Audio > 30s) + Low Hallucination")
+        print("=" * 60)
+        # 注意：这里我们过滤掉0-30秒的，只处理30秒以上的
+        _process_all_sliced(data_root, use_vllm=False, duration_filter=(30, None))
+    else:
+        print("=" * 60)
+        print("使用 Faster-Whisper 处理所有音频...")
+        print("=" * 60)
+        _process_all_sliced(data_root, use_vllm=False)
+    
+    print("\n" + "=" * 60)
+    print("所有音频处理完成！")
