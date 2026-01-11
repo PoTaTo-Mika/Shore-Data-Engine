@@ -7,6 +7,7 @@ from tqdm import tqdm
 import warnings
 import subprocess
 import shutil
+import math
 
 warnings.filterwarnings("ignore")
 
@@ -17,49 +18,35 @@ vad_utils = None
 
 def merge_segments(segments, min_duration=3.0, target_duration=15.0, max_duration=60.0, strict_gap=0.5, loose_gap=2.0):
     """
-    重写后的合并逻辑，专为 TTS 数据集优化。
-    
-    参数:
-    - min_duration: 最小保留时长，小于这个长度的孤立片段会被丢弃（除非它被合并）。
-    - target_duration: 期望的理想时长 (约 15s)。
-    - max_duration: 硬性最大时长 (约 60s)，防止 OOM。
-    - strict_gap: 当片段已经够长(>target)时，只有静音小于此值才继续合并 (倾向于切分)。
-    - loose_gap: 当片段还太短(<target)时，只要静音小于此值就允许合并 (倾向于凑长)。
+    第一步：尽可能合并短片段。
     """
     if not segments:
         return []
 
     merged = []
-    # 初始化当前片段
     current_seg = {'start': segments[0]['start'], 'end': segments[0]['end']}
 
     for i in range(1, len(segments)):
         next_seg = segments[i]
         
-        # 计算当前时长和间隙
         current_dur = current_seg['end'] - current_seg['start']
         gap = next_seg['start'] - current_seg['end']
         next_dur = next_seg['end'] - next_seg['start']
         
-        # 预测合并后的总时长
         potential_dur = current_dur + gap + next_dur
         
         should_merge = False
 
-        # --- 核心判断逻辑 ---
-        
-        # 1. 如果合并后超过硬性上限 (60s)，绝对不合并 -> 强制切分
+        # 如果合并后超过上限，绝对不合并
         if potential_dur > max_duration:
             should_merge = False
         
-        # 2. 如果当前还未达到目标长度 (15s)，且静音在允许范围内 (loose_gap)，尝试合并
+        # 还没够长，尽量合并
         elif current_dur < target_duration:
             if gap < loose_gap:
                 should_merge = True
         
-        # 3. 如果已经超过目标长度 (15s)，但还在最大长度 (60s) 内
-        #    此时变得“挑剔”，只有静音非常短 (strict_gap) 才合并（也就是连贯语气）
-        #    否则就在这里切开，保持在 15s 左右
+        # 已经够长但没超限，只有间隙很小才合并
         else:
             if gap < strict_gap:
                 should_merge = True
@@ -71,11 +58,45 @@ def merge_segments(segments, min_duration=3.0, target_duration=15.0, max_duratio
             current_seg = {'start': next_seg['start'], 'end': next_seg['end']}
 
     merged.append(current_seg)
+    return merged
+
+def split_long_segment(segment, target_duration=15.0, max_duration=20.0, overlap=0.0):
+    """
+    [新增] 第二步：强制切分超长片段。
+    如果一个片段经过合并逻辑后依然超过 max_duration (比如 VAD 识别出一整段 10分钟的音频)，
+    则强制将其均匀切分为 target_duration 长度的小段。
+    """
+    start = segment['start']
+    end = segment['end']
+    duration = end - start
     
-    # 最后过滤掉极其短的碎片 (可选)
-    final_merged = [s for s in merged if (s['end'] - s['start']) >= 1.0]
+    # 如果在允许范围内，直接返回
+    if duration <= max_duration:
+        return [segment]
     
-    return final_merged
+    # 开始强制切分
+    # 例如 600s 的音频，切成 ~15s 一段
+    chunks = []
+    curr_start = start
+    
+    while curr_start < end:
+        curr_end = min(curr_start + target_duration, end)
+        
+        # 如果剩下的不足 3秒，且前面已经有片段，尝试延长前一个片段（避免末尾出现碎渣）
+        if (end - curr_end) < 3.0 and chunks:
+             chunks[-1]['end'] = end
+             break
+        
+        chunks.append({'start': curr_start, 'end': curr_end})
+        
+        # 移动指针 (减去重叠量，确保连贯性，TTS通常不需要重叠，设为0)
+        curr_start = curr_end - overlap
+        
+        # 如果已经到了终点
+        if curr_start >= end:
+            break
+            
+    return chunks
 
 def init_worker(local_repo_path):
     global vad_model, vad_utils
@@ -89,10 +110,10 @@ def init_worker(local_repo_path):
         )
     except Exception as e:
         print(f"进程初始化失败: {e}")
-        raise e
+        # 这里不抛出异常，允许部分进程失败重试或跳过
+        pass
 
 def ffmpeg_slice(input_path, output_path, start_time, end_time):
-    # 计算持续时间
     duration = end_time - start_time
     cmd = [
         'ffmpeg', 
@@ -100,7 +121,7 @@ def ffmpeg_slice(input_path, output_path, start_time, end_time):
         '-ss', f"{start_time:.3f}",
         '-t', f"{duration:.3f}",
         '-i', input_path,
-        '-c', 'copy',
+        '-c', 'copy', # 注意：copy模式在某些MP3上可能导致时间戳不准，如果还出问题改成 -c:a pcm_s16le
         '-avoid_negative_ts', 'make_zero',
         '-y',
         output_path
@@ -120,30 +141,38 @@ def process_audio(audio_path, output_dir):
     (get_speech_timestamps, _, read_audio, _, _) = vad_utils
     
     try:
-        # 1. 准备 VAD 音频
         wav_vad = read_audio(audio_path, sampling_rate=16000)
         
-        # 2. 获取时间戳 (VAD 本身只负责找有没有人说话)
+        # 1. 获取基础时间戳
+        # 建议提高 threshold 到 0.6 或 0.7 以减少背景噪音被识别为说话
         speech_timestamps = get_speech_timestamps(
             wav_vad, 
             vad_model, 
             sampling_rate=16000,
             return_seconds=True,
-            threshold=0.5,
+            threshold=0.6,          # <--- 修改建议：稍微提高阈值
             min_silence_duration_ms=500 
         )
         
-        # 3. 合并 (使用新的逻辑和参数)
+        # 2. 合并碎片
         merged_timestamps = merge_segments(
             speech_timestamps, 
-            min_duration=3.0,     # 最小允许 3秒
-            target_duration=15.0, # 理想目标 15秒
-            max_duration=60.0,    # 最大限制 60秒
-            strict_gap=0.2,       # 超过15s后，如果停顿超过0.3s就切分
+            min_duration=3.0,
+            target_duration=15.0,
+            max_duration=60.0, 
+            strict_gap=0.2,
             loose_gap=1.5         
         )
         
-        if not merged_timestamps:
+        # 3. [关键修改] 检查并强制切分超长片段
+        final_timestamps = []
+        for seg in merged_timestamps:
+            # 这里的 max_duration 设为 20s，意味着如果有漏网之鱼超过20s，强制切开
+            # 这样就能彻底杜绝 10分钟的音频出现
+            splitted = split_long_segment(seg, target_duration=15.0, max_duration=20.0)
+            final_timestamps.extend(splitted)
+
+        if not final_timestamps:
             return
 
         os.makedirs(output_dir, exist_ok=True)
@@ -162,15 +191,14 @@ def process_audio(audio_path, output_dir):
         
         saved_count = 0
         
-        for i, seg in enumerate(merged_timestamps):
+        for i, seg in enumerate(final_timestamps):
             start_sec = seg['start']
             end_sec = seg['end']
             
-            # 双重保险：过滤太短的片段（小于1.5秒通常无法用于TTS）
             if (end_sec - start_sec) < 1.5:
                 continue
 
-            save_name = f"{name_part}_{str(i).zfill(3)}{ext_part}"
+            save_name = f"{name_part}_{str(i).zfill(3)}{ext_part}" # 增加位数以防切片过多
             save_path = os.path.join(output_dir, save_name)
             
             if is_lossless_format:
@@ -219,30 +247,25 @@ def process_folder_recursive(root_folder, max_workers=None):
     if not tasks:
         return
 
-    if shutil.which("ffmpeg") is None:
-        print("\n[注意] 未检测到 FFmpeg！非 Wav/Flac 文件可能无法正确处理。\n")
-    
-    print("正在检查并下载模型到本地缓存...")
-    try:
-        torch.hub.load(repo_or_dir='snakers4/silero-vad', model='silero_vad', trust_repo=True)
-    except:
-        pass 
-    
+    # 检查本地缓存
     hub_dir = torch.hub.get_dir()
     local_repo_path = os.path.join(hub_dir, 'snakers4_silero-vad_master')
     
+    # 简单的本地模型检查逻辑
     if not os.path.exists(local_repo_path):
-        candidates = [d for d in os.listdir(hub_dir) if 'silero' in d]
-        if candidates:
-            local_repo_path = os.path.join(hub_dir, candidates[0])
-        else:
-            # 如果本地实在没有，这里可能会报错，建议第一次运行联网
-            pass
+        print("未在默认路径找到 Silero VAD，尝试在线加载一次以缓存...")
+        try:
+            torch.hub.load(repo_or_dir='snakers4/silero-vad', model='silero_vad', trust_repo=True)
+            # 再次寻找
+            candidates = [d for d in os.listdir(hub_dir) if 'silero' in d]
+            if candidates:
+                local_repo_path = os.path.join(hub_dir, candidates[0])
+        except Exception as e:
+            print(f"模型下载/加载失败: {e}")
+            return
     
-    print(f"使用模型路径: {local_repo_path}")
-
     if max_workers is None:
-        max_workers = max(1, os.cpu_count() - 2) # 保留一点 CPU
+        max_workers = max(1, os.cpu_count() - 2)
     
     print(f"开始处理，使用 {max_workers} 个进程...")
     
@@ -250,6 +273,5 @@ def process_folder_recursive(root_folder, max_workers=None):
         list(tqdm(executor.map(_process_single_wrapper, tasks), total=len(tasks), unit="file"))
 
 if __name__ == '__main__':
-    # 将这里修改为你的数据目录
-    DATA_DIR = r'data' 
+    DATA_DIR = 'data' 
     process_folder_recursive(DATA_DIR)
