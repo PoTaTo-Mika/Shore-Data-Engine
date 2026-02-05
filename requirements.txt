@@ -16,15 +16,19 @@ beautifulsoup4>=4.12.0
 #############################################
 # Source separation (UVR via Demucs)
 #############################################
-git+https://github.com/facebookresearch/demucs#egg=demucs # first as it's torch dependency is the 2.0.1
+# first as it's torch dependency is the 2.0.1
+git+https://github.com/facebookresearch/demucs#egg=demucs
 
 #############################################
-# models (install the ones you need)
+# Models and VAD
 #############################################
 faster-whisper
 huggingface-hub
 funasr
 silero-vad
+ten-vad
+qwen-asr
+qwen-asr[vllm]
 #############################################
 # Deep learning runtime (install torch/torchaudio per platform/CUDA)
 #############################################
@@ -32,12 +36,21 @@ torch
 torchaudio
 
 #############################################
-# LLM polish and APIs
+# LLM APIs and Multimodal Utilities
 #############################################
 openai>=1.0.0
 transformers
 modelscope
+qwen_omni_utils
+
 #############################################
-# Optional: vLLM acceleration for Whisper (Linux only)
-# Uncomment on Linux if you plan to use run_whisper.py with vLLM
+# Distillation and Third-party SDKs
+#############################################
+websockets
+fish-audio-sdk
+
+#############################################
+# Optional: vLLM acceleration (Linux only)
+#############################################
+# Uncomment on Linux if you plan to use run_whisper.py or Qwen-Omni with vLLM
 # vllm>=0.10.0
