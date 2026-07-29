@@ -12,9 +12,6 @@ from collections import defaultdict
 # 国家代码 (top podcasts 是按 country 拉, 印度区=IN)
 COUNTRY_CODE = "IN"
 
-# 主目标语言 (RSS <language> 标签的 ISO 639-1 前缀)
-TARGET_LANGUAGE = "hi"  # Hindi
-
 # 每个 genre 拉多少条 top podcasts (Apple 上限约 200)
 TOP_LIMIT_PER_GENRE = 100
 
@@ -35,15 +32,28 @@ GENRES = {
 }
 
 # 下载根目录, 最终结构只有两层:
-#   data/hindi/<podcast_name>__<episode_title>.<ext>
-#   data/unknown/<...>
+#   data/<lang>/<podcast_name>__<episode_title>.<ext>
+#   <lang> 由 RSS <language> 标签决定, 解析失败归入 unknown/
 BASE_DIR = "data"
 
 # RSS <language> 没有 / 解析不出来时 归到这个子目录
 UNKNOWN_LANG_DIR = "unknown"
 
-# RSS 里解析出目标语言时归到这个子目录 (跟 TARGET_LANGUAGE 对应)
-HINDI_DIR = "hindi"
+# 常见语言别名 → ISO 639-1 代码
+LANG_ALIASES = {
+    "hin": "hi", "hindi": "hi",
+    "eng": "en", "english": "en",
+    "spa": "es", "spanish": "es",
+    "fra": "fr", "french": "fr",
+    "deu": "de", "german": "de",
+    "jpn": "ja", "japanese": "ja",
+    "kor": "ko", "korean": "ko",
+    "zho": "zh", "chinese": "zh",
+    "por": "pt", "portuguese": "pt",
+    "ita": "it", "italian": "it",
+    "rus": "ru", "russian": "ru",
+    "ara": "ar", "arabic": "ar",
+}
 
 # 单个播客最多下载多少集 (None / 0 = 不限制)
 # TTS 训练一般 ~100 集就能覆盖说话人风格
@@ -142,6 +152,9 @@ def fetch_top_podcasts_ids(country, genre_id=None, limit=100):
         resp.raise_for_status()
         data = resp.json()
         entries = data.get("feed", {}).get("entry", [])
+        # limit=1 时 Apple 返回单个 dict 而非 list，归一化
+        if isinstance(entries, dict):
+            entries = [entries]
         ids = []
         for e in entries:
             pid = e.get("id", {}).get("attributes", {}).get("im:id")
@@ -268,26 +281,22 @@ def unwrap_anchor_url(url):
 
 ################### 第 3 步: 按语言分类 ###################
 
-def classify_language(rss_lang, target_lang):
+def classify_language(rss_lang):
     """
-    'hi' / 'hi-IN' / 'hin' / 'Hindi' ... → 'hindi'
-    'en' / 'en-US' ...                  → 'unknown' (因为不是目标语言)
-    None / ''                           → 'unknown'
+    按 RSS <language> 标签分桶:
+      'hi' / 'hi-IN' / 'hindi' ... → 'hi'
+      'en' / 'en-US' / 'english' .. → 'en'
+      None / ''                    → 'unknown'
     """
     if not rss_lang:
         return UNKNOWN_LANG_DIR
 
     s = rss_lang.strip().lower()
+    # 拆分主语言代码: 'hi-IN' → 'hi', 'english' → 'english'
     main = re.split(r'[-_.]', s)[0]
 
-    # Hindi / English 的常见别名
-    if target_lang == "hi" and main in ("hi", "hin", "hindi"):
-        return HINDI_DIR
-    if target_lang == "en" and main in ("en", "eng", "english"):
-        return "english"
-    if main == target_lang:
-        return target_lang
-    return UNKNOWN_LANG_DIR
+    # 别名映射 -> 标准 ISO 639-1
+    return LANG_ALIASES.get(main, main)
 
 
 ################### 主流程: 下载到扁平结构 ###################
@@ -384,7 +393,7 @@ def main():
         if i % 10 == 0 or i == len(podcasts_by_id):
             print(f"  进度: {i}/{len(podcasts_by_id)}")
         rss_lang, episodes = parse_rss(pod["feedUrl"])
-        lang_dir = classify_language(rss_lang, TARGET_LANGUAGE)
+        lang_dir = classify_language(rss_lang)
         pod["rss_lang"] = rss_lang
         pod["episodes"] = episodes
         buckets[lang_dir].append(pod)
@@ -409,7 +418,7 @@ def main():
     print(f"分桶结果已存盘到 {summary_path}\n")
 
     # Step 3: 按桶下载到扁平目录
-    print(f"=== 开始下载到 {BASE_DIR}/<hindi|unknown>/ ===\n")
+    print(f"=== 开始下载到 {BASE_DIR}/<lang>/ ===\n")
     for lang_dir in sorted(buckets.keys(), key=lambda x: -len(buckets[x])):
         pods = buckets[lang_dir]
         target_dir = os.path.join(BASE_DIR, lang_dir)
