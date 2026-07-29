@@ -30,7 +30,9 @@ def build_s3_client():
 
 def upload_tar(s3, tar_path: Path) -> bool:
     """上传单个 tar 到 S3，成功返回 True."""
-    s3_key = f"{S3_PREFIX}{tar_path.name}"
+    # 从文件名提取语言桶: en_20260729_165520_000.tar → en
+    lang = tar_path.name.split("_")[0]
+    s3_key = f"{S3_PREFIX}{lang}/{tar_path.name}"
     size_mb = tar_path.stat().st_size / 1024 ** 2
     try:
         print(f"  [↑] 上传: {tar_path.name} ({size_mb:.0f} MiB) -> s3://{S3_BUCKET}/{s3_key}")
