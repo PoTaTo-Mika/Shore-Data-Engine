@@ -216,3 +216,4 @@ logs/*.log
 .cursor
 .vscode
 demucs/
+tests/

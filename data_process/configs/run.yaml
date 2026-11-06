@@ -1,0 +1,62 @@
+# Single source of truth for the annotation pipeline.
+data_root: data
+sliced_dirname: sliced
+output_name: transcription.json
+audio_extensions: [.wav, .mp3, .flac, .m4a, .ogg, .opus, .aac]
+engine_path: engine/sglang-omni
+
+# Every model processor is a backend; local operators and HTTP services share the
+# same Payload -> Backend.process() -> Result contract.
+backends:
+  local:
+    type: local
+  omni:
+    type: http
+    base_url: ${OMNI_BASE_URL:-http://127.0.0.1:8000}
+    api_key_env: OMNI_API_KEY
+    health_path: /health
+    timeout_s: 120
+    concurrency: 16
+    retry:
+      max_attempts: 5
+      backoff_s: 1.0
+      status_codes: [429, 500, 502, 503, 504]
+
+# Only per-model special parameters are listed here; unlisted fields keep server defaults.
+models:
+  demucs:
+    backend: local
+    task: audio.separate
+  silero_vad:
+    backend: local
+    task: audio.slice
+    params:
+      max_workers: 8
+  label_writer:
+    backend: local
+    task: label.export
+  qwen3_asr:
+    backend: omni
+    task: audio.transcribe
+    model: Qwen/Qwen3-ASR-1.7B
+    endpoint: /v1/audio/transcriptions
+    transport: multipart
+    params:
+      language: zh
+      response_format: json
+  qwen3_omni:
+    backend: omni
+    task: audio.annotate
+    model: Qwen/Qwen3-Omni-30B-A3B-Instruct
+    endpoint: /v1/chat/completions
+    transport: base64
+    params:
+      modalities: [text]
+
+# scope: dataset -> one payload for the tree; sliced -> one payload per sliced dir.
+# resume: true writes annotations incrementally into transcription.json.
+pipeline:
+  - {stage: uvr, model: demucs, scope: dataset}
+  - {stage: slicer, model: silero_vad, scope: dataset}
+  - {stage: asr, model: qwen3_asr, scope: sliced, resume: true}
+  - {stage: export_labels, model: label_writer, scope: sliced}

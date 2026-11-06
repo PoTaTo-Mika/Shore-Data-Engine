@@ -23,12 +23,12 @@ Shore-Data-Engine/
     distill/          # 蒸馏
   logs/               # 日志输出目录
   tools/              # 辅助工具（统计时长、导出标签、LLM润色）
-  requirements.txt
+  pyproject.toml
   README.md
 ```
 
 ### 环境要求
-- Python 3.9+（推荐 3.10）
+- Python 3.10+（sglang-omni 服务端需 3.11 / 3.12，建议使用独立环境）
 - 建议使用 GPU（NVIDIA CUDA）以加速 ASR/UVR
 - 对于 `torch`/`torchaudio`，请根据显卡和 CUDA 版本从官方指引安装对应版本
 - Windows 与 Linux 均可运行；`vLLM` 仅在 Linux 上支持
@@ -49,8 +49,13 @@ source .venv/bin/activate  # Linux / macOS
 
 ```bash
 pip install -U pip
-pip install -r requirements.txt
+pip install -e .              # 仅客户端：配置解析 + 请求 sglang-omni 服务
+pip install -e ".[local]"     # 本地 UVR / slicer 算子
+pip install -e ".[crawler]"   # 爬虫
+pip install -e ".[dev]"       # 测试与 lint
+pip install -e ".[all]"       # 全部
 
+# 安装后可用 shore 命令，例如：shore --dry-run
 # 根据你的 CUDA 环境，单独安装合适版本的 torch/torchaudio（如果上一步未自动装好）
 # 例如：参照 PyTorch 官网指令安装
 ```

@@ -1,6 +1,6 @@
-# 先安装主要内容
-pip install -r requirements.txt
-pip install vllm
+#!/usr/bin/env bash
+set -euo pipefail
 
-# 8卡机器直接用这个编译
-MAX_JOBS=32 pip install -U flash-attn --no-build-isolation
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+python -m pip install -U pip
+python -m pip install -e ".[all]"
