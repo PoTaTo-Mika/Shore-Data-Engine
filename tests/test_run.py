@@ -1,30 +1,29 @@
-"""Tests for the payload-based annotation pipeline."""
+"""Tests for the config-driven serial tar pipeline."""
 
 import base64
+import io
 import json
 import os
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from typing import cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import httpx
 
-from data_process.backends import (
-    HttpBackend,
-    LocalBackend,
-    Payload,
+from data_process.annotation import load_completed
+from engine.backends import (
+    Config,
     Request,
-    build_backend,
+    Service,
     build_request,
     extract_text,
     post,
+    start_services,
 )
-from data_process.run import (
-    Config,
-    build_payloads,
+from engine.run import (
     engine_revision,
     expand_env,
     load_config,
@@ -32,8 +31,6 @@ from data_process.run import (
 )
 
 ASR_MODEL: Config = {
-    "backend": "omni",
-    "task": "audio.transcribe",
     "model": "Qwen/Qwen3-ASR-1.7B",
     "endpoint": "/v1/audio/transcriptions",
     "transport": "multipart",
@@ -41,14 +38,36 @@ ASR_MODEL: Config = {
 }
 RETRY: Config = {"max_attempts": 3, "backoff_s": 0.0, "status_codes": [503]}
 SERVICE: Config = {
-    "type": "http",
     "base_url": "http://svc",
     "health_path": "/health",
     "api_key_env": "",
     "timeout_s": 5.0,
-    "concurrency": 2,
+    "startup_timeout_s": 1.0,
     "retry": RETRY,
 }
+
+
+def make_audio_tar(path: Path, names: tuple[str, ...]) -> None:
+    with tarfile.open(path, "w") as tar:
+        for name in names:
+            info = tarfile.TarInfo(name)
+            info.size = 4
+            tar.addfile(info, io.BytesIO(b"RIFF"))
+
+
+def pipeline_config(root: Path) -> Config:
+    return {
+        "data_root": str(root),
+        "output_name": "annotations.jsonl",
+        "audio_extensions": [".opus"],
+        "services": {"omni": SERVICE},
+        "models": {"demucs": {}, "rms_vad": {}, "asr": ASR_MODEL},
+        "stages": [
+            {"name": "stage1", "task": "uvr", "model": "demucs"},
+            {"name": "stage2", "task": "slicer", "model": "rms_vad"},
+            {"name": "stage3", "task": "asr", "service": "omni", "model": "asr"},
+        ],
+    }
 
 
 class ConfigTests(unittest.TestCase):
@@ -64,13 +83,14 @@ class ConfigTests(unittest.TestCase):
                 "http://example:1",
             )
 
-    def test_loads_repository_config(self) -> None:
+    def test_repository_config_declares_three_stages(self) -> None:
         cfg = load_config(
-            Path(__file__).resolve().parents[1] / "data_process" / "configs" / "run.yaml"
+            Path(__file__).resolve().parents[1] / "engine" / "configs" / "run.yaml"
         )
-        self.assertEqual(cfg["data_root"], "data")
-        self.assertIn("qwen3_asr", cast(dict[str, object], cfg["models"]))
-        self.assertIn("omni", cast(dict[str, object], cfg["backends"]))
+        stages = cast(list[Config], cfg["stages"])
+        self.assertEqual([s["name"] for s in stages], ["stage1", "stage2", "stage3"])
+        self.assertEqual([s["task"] for s in stages], ["uvr", "slicer", "asr"])
+        self.assertEqual(cfg["output_name"], "annotations.jsonl")
 
     def test_engine_revision_tracks_submodule(self) -> None:
         path = Path(__file__).resolve().parents[1] / "engine" / "sglang-omni"
@@ -80,62 +100,26 @@ class ConfigTests(unittest.TestCase):
         else:
             self.assertIsNone(revision)
 
-    def test_build_payloads_respects_scope(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "album" / "sliced").mkdir(parents=True)
-            (root / "album" / "a.wav").write_bytes(b"RIFF")
-            (root / "album" / "sliced" / "b.wav").write_bytes(b"RIFF")
-            cfg: Config = {
-                "data_root": str(root),
-                "sliced_dirname": "sliced",
-                "audio_extensions": [".wav"],
-            }
-            dataset = build_payloads(
-                {"scope": "dataset"}, {"task": "audio.separate"}, cfg
-            )
-            self.assertEqual(len(dataset), 1)
-            self.assertEqual(dataset[0].scope, root)
-            self.assertEqual([p.name for p in dataset[0].inputs], ["a.wav"])
-            sliced = build_payloads(
-                {"scope": "sliced"}, {"task": "label.export"}, cfg
-            )
-            self.assertEqual(len(sliced), 1)
-            self.assertEqual([p.name for p in sliced[0].inputs], ["b.wav"])
-
 
 class RequestTests(unittest.TestCase):
-    def test_transcription_payload_only_sends_declared_fields(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            audio = Path(tmp) / "clip.wav"
-            audio.write_bytes(b"RIFF")
-            model = {
-                **ASR_MODEL,
-                "params": {
-                    **cast(dict[str, object], ASR_MODEL["params"]),
-                    "prompt": None,
-                },
-            }
-            request = build_request(model, audio, "http://svc")
-            self.assertEqual(
-                request.data,
-                {
-                    "model": "Qwen/Qwen3-ASR-1.7B",
-                    "language": "zh",
-                    "response_format": "json",
-                },
-            )
-            files = cast(dict[str, tuple[str, bytes, str]], request.files)
-            self.assertEqual(files["file"][0], "clip.wav")
-            self.assertEqual(files["file"][1], b"RIFF")
+    def test_transcription_payload_uses_bytes(self) -> None:
+        request = build_request(ASR_MODEL, "album/clip.opus", b"RIFF", "http://svc")
+        self.assertEqual(
+            request.data,
+            {
+                "model": "Qwen/Qwen3-ASR-1.7B",
+                "language": "zh",
+                "response_format": "json",
+            },
+        )
+        files = cast(dict[str, tuple[str, bytes, str]], request.files)
+        self.assertEqual(files["file"][0], "clip.opus")
+        self.assertEqual(files["file"][1], b"RIFF")
 
     def test_unmapped_field_is_rejected(self) -> None:
         model = {**ASR_MODEL, "params": {"language": "zh", "temperature": 0}}
-        with tempfile.TemporaryDirectory() as tmp:
-            audio = Path(tmp) / "clip.wav"
-            audio.write_bytes(b"RIFF")
-            with self.assertRaises(ValueError):
-                build_request(model, audio, "http://svc")
+        with self.assertRaises(ValueError):
+            build_request(model, "clip.wav", b"RIFF", "http://svc")
 
     def test_chat_request_embeds_base64_audio(self) -> None:
         model: Config = {
@@ -144,12 +128,8 @@ class RequestTests(unittest.TestCase):
             "transport": "base64",
             "params": {"modalities": ["text"]},
         }
-        with tempfile.TemporaryDirectory() as tmp:
-            audio = Path(tmp) / "clip.wav"
-            audio.write_bytes(b"RIFF")
-            request = build_request(model, audio, "http://svc")
+        request = build_request(model, "clip.wav", b"RIFF", "http://svc")
         body = cast(dict[str, object], request.body)
-        self.assertEqual(body["modalities"], ["text"])
         self.assertIn(base64.b64encode(b"RIFF").decode("ascii"), json.dumps(body))
 
     def test_extract_text_from_both_endpoints(self) -> None:
@@ -181,148 +161,123 @@ class RequestTests(unittest.TestCase):
         self.assertEqual(len(calls), 3)
 
 
-class BackendTests(unittest.TestCase):
-    def test_local_backend_dispatches_by_task(self) -> None:
-        fake = SimpleNamespace(
-            process_folder=MagicMock(),
-            process_folder_recursive=MagicMock(),
-            process_one_sliced_dir=MagicMock(),
-        )
+class ServiceTests(unittest.TestCase):
+    def test_services_start_in_config_order(self) -> None:
+        with patch.object(Service, "start", autospec=True) as starter:
+            services = start_services({"first": SERVICE, "second": SERVICE})
+        self.assertEqual([s.name for s in services], ["first", "second"])
+        self.assertEqual(starter.call_count, 2)
+
+    def test_health_is_checked_before_use(self) -> None:
+        calls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request.url.path)
+            return httpx.Response(200)
+
+        real_client = httpx.Client
         with patch(
-            "data_process.backends.importlib.import_module", return_value=fake
-        ) as importer:
-            backend = LocalBackend()
-            separate = backend.process(
-                Payload(
-                    task="audio.separate",
-                    scope=Path("/data"),
-                    inputs=(),
-                    params={},
-                )
-            )
-            importer.assert_called_with("data_process.uvr.run_demucs")
-            fake.process_folder.assert_called_once_with("/data")
-            self.assertEqual(separate.annotations, {})
-            backend.process(
-                Payload(
-                    task="audio.slice",
-                    scope=Path("/data"),
-                    inputs=(),
-                    params={"max_workers": 8},
-                )
-            )
-            fake.process_folder_recursive.assert_called_once_with(
-                "/data", max_workers=8
-            )
-            backend.process(
-                Payload(
-                    task="label.export",
-                    scope=Path("/data/sliced"),
-                    inputs=(),
-                    params={},
-                )
-            )
-            fake.process_one_sliced_dir.assert_called_once_with(Path("/data/sliced"))
+            "engine.backends.httpx.Client",
+            side_effect=lambda **kwargs: real_client(
+                transport=httpx.MockTransport(handler), **kwargs
+            ),
+        ):
+            service = Service("omni", SERVICE)
+            service.start()
+            service.stop()
+        self.assertEqual(calls, ["/health"])
 
-    def test_unknown_backend_and_task_are_rejected(self) -> None:
-        with self.assertRaises(ValueError):
-            build_backend({"type": "other"}, ASR_MODEL)
-        with self.assertRaises(ValueError):
-            LocalBackend().process(
-                Payload(task="unknown", scope=Path("/data"), inputs=(), params={})
-            )
 
-    def test_http_backend_returns_annotations(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            audio = Path(tmp) / "clip.wav"
-            audio.write_bytes(b"RIFF")
-            calls: list[str] = []
-
-            def handler(request: httpx.Request) -> httpx.Response:
-                calls.append(request.url.path)
-                if request.url.path == "/health":
-                    return httpx.Response(200, json={"status": "healthy"})
-                return httpx.Response(200, json={"text": "hello"})
-
-            transport = httpx.MockTransport(handler)
-            real_client = httpx.Client
-            with patch(
-                "data_process.backends.httpx.Client",
-                side_effect=lambda **kwargs: real_client(transport=transport, **kwargs),
-            ):
-                backend = HttpBackend(SERVICE, ASR_MODEL)
-                result = backend.process(
-                    Payload(
-                        task="audio.transcribe",
-                        scope=Path(tmp),
-                        inputs=(audio,),
-                        params={},
-                    )
-                )
-            self.assertEqual(result.annotations, {str(audio.absolute()): "hello"})
-            self.assertEqual(result.failures, ())
-            self.assertEqual(calls, ["/health", "/v1/audio/transcriptions"])
-
-    def test_pipeline_resumes_without_repeating_requests(self) -> None:
+class PipelineTests(unittest.TestCase):
+    def test_stages_run_serially_and_resume(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            sliced = root / "album" / "sliced"
-            sliced.mkdir(parents=True)
-            for name in ("a.wav", "b.wav"):
-                (sliced / name).write_bytes(b"RIFF")
+            tar_path = root / "en_000.tar"
+            make_audio_tar(tar_path, ("album/a.opus", "album/b.opus"))
+            cfg = pipeline_config(root)
             calls: list[str] = []
 
             def handler(request: httpx.Request) -> httpx.Response:
                 calls.append(request.url.path)
-                if request.url.path == "/health":
-                    return httpx.Response(200, json={"status": "healthy"})
                 return httpx.Response(200, json={"text": "hello"})
 
-            transport = httpx.MockTransport(handler)
-            cfg: Config = {
-                "data_root": str(root),
-                "sliced_dirname": "sliced",
-                "output_name": "transcription.json",
-                "audio_extensions": [".wav"],
-                "backends": {"omni": SERVICE},
-                "models": {"asr": ASR_MODEL},
-                "pipeline": [
-                    {"stage": "asr", "model": "asr", "scope": "sliced", "resume": True}
-                ],
-            }
-            real_client = httpx.Client
-            with patch(
-                "data_process.backends.httpx.Client",
-                side_effect=lambda **kwargs: real_client(transport=transport, **kwargs),
-            ):
-                run_pipeline(cfg, "asr", 0, False)
-                pairs = cast(
-                    dict[str, str],
-                    json.loads((sliced / "transcription.json").read_text(encoding="utf-8")),
-                )
-                self.assertEqual(sorted(Path(k).name for k in pairs), ["a.wav", "b.wav"])
-                self.assertEqual(set(pairs.values()), {"hello"})
-                run_pipeline(cfg, "asr", 0, False)
-                self.assertEqual(
-                    calls.count("/v1/audio/transcriptions"), 2
-                )
+            def fake_start(services: dict[str, Config], dry_run: bool = False):
+                client = httpx.Client(transport=httpx.MockTransport(handler))
+                return [Service("omni", SERVICE, client=client)]
 
-    def test_dry_run_does_not_call_backends(self) -> None:
-        cfg: Config = {
-            "data_root": "data",
-            "sliced_dirname": "sliced",
-            "output_name": "transcription.json",
-            "audio_extensions": [".wav"],
-            "backends": {"local": {"type": "local"}, "omni": SERVICE},
-            "models": {
-                "demucs": {"backend": "local", "task": "audio.separate"},
-                "asr": ASR_MODEL,
-            },
-            "pipeline": [
-                {"stage": "uvr", "model": "demucs", "scope": "dataset"},
-                {"stage": "asr", "model": "asr", "scope": "sliced", "resume": True},
-            ],
-        }
-        with patch.object(LocalBackend, "process") as local_process:
-            run_pipeline(cfg, None, 0, True)
-            local_process.assert_not_called()
+            operator_calls: list[str] = []
+
+            def fake_build_operator(task: str, model: Config):
+                operator_calls.append(task)
+                return lambda record: [record]
+
+            with patch("engine.run.start_services", side_effect=fake_start), patch(
+                "engine.run.build_operator", side_effect=fake_build_operator
+            ):
+                run_pipeline(cfg, None, 0, False)
+
+            self.assertEqual(operator_calls, ["uvr", "slicer"])
+            output = root / "annotations.jsonl"
+            records = [
+                json.loads(line)
+                for line in output.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(
+                {r["audio_id"] for r in records},
+                {"album/a.opus", "album/b.opus"},
+            )
+            self.assertTrue(
+                all(
+                    r["tar_name"] == "en_000.tar" and r["asr_text"] == "hello"
+                    for r in records
+                )
+            )
+            self.assertEqual(
+                load_completed(output),
+                {("en_000.tar", "album/a.opus"), ("en_000.tar", "album/b.opus")},
+            )
+            transcribed = calls.count("/v1/audio/transcriptions")
+            self.assertEqual(transcribed, 2)
+
+            with patch("engine.run.start_services", side_effect=fake_start), patch(
+                "engine.run.build_operator", side_effect=fake_build_operator
+            ):
+                run_pipeline(cfg, None, 0, False)
+            self.assertEqual(calls.count("/v1/audio/transcriptions"), transcribed)
+            self.assertEqual(operator_calls, ["uvr", "slicer"])
+
+    def test_stage_filter_and_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            make_audio_tar(root / "en_000.tar", ("a.opus", "b.opus"))
+            cfg = pipeline_config(root)
+            calls: list[str] = []
+
+            def handler(request: httpx.Request) -> httpx.Response:
+                calls.append(request.url.path)
+                return httpx.Response(200, json={"text": "hello"})
+
+            def fake_start(services: dict[str, Config], dry_run: bool = False):
+                client = httpx.Client(transport=httpx.MockTransport(handler))
+                return [Service("omni", SERVICE, client=client)]
+
+            with patch("engine.run.start_services", side_effect=fake_start), patch(
+                "engine.run.build_operator"
+            ) as build:
+                run_pipeline(cfg, "stage3", 1, False)
+            build.assert_not_called()
+            lines = (root / "annotations.jsonl").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 1)
+
+    def test_dry_run_starts_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            make_audio_tar(root / "en_000.tar", ("a.opus",))
+            cfg = pipeline_config(root)
+            with patch("engine.run.start_services") as start, patch(
+                "engine.run.build_operator"
+            ) as build:
+                run_pipeline(cfg, None, 0, True)
+            start.assert_not_called()
+            build.assert_not_called()
+            self.assertFalse((root / "annotations.jsonl").exists())

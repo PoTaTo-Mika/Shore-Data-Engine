@@ -63,18 +63,22 @@ all = [
 ]
 
 [project.scripts]
-shore = "data_process.run:main"
+shore = "engine.run:main"
 
 [project.urls]
 Repository = "https://github.com/PoTaTo-Mika/Shore-Data-Engine"
 
 [tool.uv.sources]
-demucs = { path = "offline_deps/demucs", editable = true }
+demucs = { path = "third-party/demucs", editable = true }
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["data_process*", "tools*", "crawler*"]
+include = ["data_process*", "engine", "engine.configs", "tools*", "crawler*"]
 namespaces = true
 
 [tool.setuptools.package-data]
-"data_process.configs" = ["*.yaml"]
+"engine.configs" = ["*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["engine/sglang-omni", "third-party", "build"]

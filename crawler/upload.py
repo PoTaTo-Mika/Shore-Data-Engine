@@ -1,20 +1,36 @@
+"""Upload packed tars to object storage and remove the local copies."""
+
+import concurrent.futures
+import logging
 import os
 import time
+from pathlib import Path
+
 import boto3
 from botocore.config import Config
-from pathlib import Path
-import concurrent.futures
 
-# ================= 配置区域 =================
-# 自己看底下内容配置，重要信息已脱敏
+logger = logging.getLogger(__name__)
 
-WATCH_DIR = "data"                # 监控 .tar 的目录
-SCAN_INTERVAL = 10                # 扫描间隔（秒）
-MAX_WORKERS = 4                   # 并发上传数
-# ===========================================
+WATCH_DIR = Path(os.environ.get("SHORE_DATA_DIR", "data")).resolve()
+SCAN_INTERVAL = float(os.environ.get("SHORE_SCAN_INTERVAL", "10"))
+MAX_WORKERS = int(os.environ.get("SHORE_UPLOAD_WORKERS", "4"))
+
+S3_ENDPOINT = os.environ.get("S3_ENDPOINT")
+S3_KEY = os.environ.get("S3_KEY")
+S3_SECRET = os.environ.get("S3_SECRET")
+S3_BUCKET = os.environ.get("S3_BUCKET")
+S3_PREFIX = os.environ.get("S3_PREFIX", "")
 
 
 def build_s3_client():
+    for name, value in (
+        ("S3_ENDPOINT", S3_ENDPOINT),
+        ("S3_KEY", S3_KEY),
+        ("S3_SECRET", S3_SECRET),
+        ("S3_BUCKET", S3_BUCKET),
+    ):
+        if not value:
+            raise ValueError(f"Missing environment variable: {name}")
     return boto3.client(
         "s3",
         endpoint_url=S3_ENDPOINT,
@@ -29,69 +45,55 @@ def build_s3_client():
 
 
 def upload_tar(s3, tar_path: Path) -> bool:
-    """上传单个 tar 到 S3，成功返回 True."""
-    # 从文件名提取语言桶: en_20260729_165520_000.tar → en
     lang = tar_path.name.split("_")[0]
-    s3_key = f"{S3_PREFIX}{lang}/{tar_path.name}"
-    size_mb = tar_path.stat().st_size / 1024 ** 2
+    key = f"{S3_PREFIX}{lang}/{tar_path.name}"
+    logger.info("Uploading %s to s3://%s/%s", tar_path.name, S3_BUCKET, key)
     try:
-        print(f"  [↑] 上传: {tar_path.name} ({size_mb:.0f} MiB) -> s3://{S3_BUCKET}/{s3_key}")
-        s3.upload_file(str(tar_path), S3_BUCKET, s3_key, ExtraArgs={"ACL": "private"})
+        s3.upload_file(str(tar_path), S3_BUCKET, key, ExtraArgs={"ACL": "private"})
         return True
-    except Exception as e:
-        print(f"  [!] 上传失败 {tar_path.name}: {e}")
+    except Exception:
+        logger.exception("Upload failed: %s", tar_path.name)
         return False
 
 
 def scan_tars(watch_dir: Path) -> list[Path]:
-    """扫描目录下所有 .tar 文件（跳过 .tmp）."""
     if not watch_dir.exists():
         return []
-    return sorted(
-        f for f in watch_dir.iterdir()
-        if f.is_file() and f.suffix == ".tar"
-    )
+    return sorted(f for f in watch_dir.iterdir() if f.is_file() and f.suffix == ".tar")
 
 
-def start_monitor():
-    watch_dir = Path(WATCH_DIR).resolve()
-    print(f"[*] 开始监控 .tar: {watch_dir} -> s3://{S3_BUCKET}/{S3_PREFIX}")
-
+def start_monitor() -> None:
+    WATCH_DIR.mkdir(parents=True, exist_ok=True)
+    logger.info("Watching %s for tars", WATCH_DIR)
     s3 = build_s3_client()
-    processing: set[str] = set()  # 正在处理的文件名
+    processing: set[str] = set()
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS)
     future_to_name: dict[concurrent.futures.Future, str] = {}
-
     while True:
         try:
-            # 清理已完成的任务
-            done = [f for f in future_to_name if f.done()]
-            for f in done:
-                name = future_to_name.pop(f)
+            for future in [f for f in future_to_name if f.done()]:
+                name = future_to_name.pop(future)
                 processing.discard(name)
                 try:
-                    if f.result():
-                        tar_path = watch_dir / name
+                    if future.result():
+                        tar_path = WATCH_DIR / name
                         if tar_path.exists():
                             tar_path.unlink()
-                            print(f"  [√] 已上传并删除: {name}")
-                except Exception as e:
-                    print(f"  [!] 任务异常 {name}: {e}")
+                            logger.info("Uploaded and removed %s", name)
+                except Exception:
+                    logger.exception("Upload task failed: %s", name)
 
-            # 扫描新 tar
-            for tar_path in scan_tars(watch_dir):
+            for tar_path in scan_tars(WATCH_DIR):
                 if tar_path.name in processing:
                     continue
                 processing.add(tar_path.name)
                 future = executor.submit(upload_tar, s3, tar_path)
                 future_to_name[future] = tar_path.name
-
-        except Exception as e:
-            print(f"[X] 监控循环出错: {e}")
-
+        except Exception:
+            logger.exception("Monitor iteration failed; retrying")
         time.sleep(SCAN_INTERVAL)
 
 
 if __name__ == "__main__":
-    os.makedirs(WATCH_DIR, exist_ok=True)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     start_monitor()

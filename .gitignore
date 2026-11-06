@@ -216,5 +216,5 @@ logs/*.log
 .cursor
 .vscode
 demucs/
-!offline_deps/demucs/
+!third-party/demucs/
 !/tests/

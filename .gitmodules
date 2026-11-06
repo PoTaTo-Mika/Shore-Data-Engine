@@ -3,6 +3,6 @@
 	url = https://github.com/sgl-project/sglang-omni.git
 	branch = main
 [submodule "offline_deps/demucs"]
-	path = offline_deps/demucs
+	path = third-party/demucs
 	url = https://github.com/facebookresearch/demucs.git
 	branch = main
