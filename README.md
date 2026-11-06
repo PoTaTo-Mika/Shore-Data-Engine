@@ -49,11 +49,13 @@ source .venv/bin/activate  # Linux / macOS
 
 ```bash
 pip install -U pip
-pip install -e .              # 仅客户端：配置解析 + 请求 sglang-omni 服务
-pip install -e ".[local]"     # 本地 UVR / slicer 算子
-pip install -e ".[crawler]"   # 爬虫
-pip install -e ".[dev]"       # 测试与 lint
-pip install -e ".[all]"       # 全部
+git submodule update --init           # engine/sglang-omni + offline_deps/demucs
+pip install -e offline_deps/demucs    # 本地 UVR 算子，来自 submodule
+pip install -e .                      # 仅客户端：配置解析 + 请求 sglang-omni 服务
+pip install -e ".[local]"             # 本地 UVR / slicer 算子
+pip install -e ".[crawler]"           # 爬虫
+pip install -e ".[dev]"               # 测试与 lint
+pip install -e ".[all]"               # 全部
 
 # 安装后可用 shore 命令，例如：shore --dry-run
 # 根据你的 CUDA 环境，单独安装合适版本的 torch/torchaudio（如果上一步未自动装好）
