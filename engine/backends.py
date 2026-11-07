@@ -8,7 +8,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, cast
+from typing import cast
 
 import httpx
 
@@ -175,10 +175,6 @@ class Service:
             self.process = None
 
 
-class Transcriber(Protocol):
-    def transcribe(self, audio_id: str, data: bytes) -> str: ...
-
-
 class HttpTranscriber:
     def __init__(self, service: Service, model: Config) -> None:
         assert service.client is not None
@@ -193,11 +189,9 @@ class HttpTranscriber:
         return extract_text(cast(str, self.model["endpoint"]), response)
 
 
-def start_services(services: dict[str, Config], dry_run: bool = False) -> list[Service]:
+def start_services(services: dict[str, Config]) -> list[Service]:
     """Launch services in config order and wait for each one to become healthy."""
     started: list[Service] = []
-    if dry_run:
-        return started
     for name, config in services.items():
         service = Service(name, config)
         try:

@@ -11,9 +11,6 @@ from typing import cast
 
 logger = logging.getLogger(__name__)
 
-AUDIO_EXTS = frozenset(
-    {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".opus", ".aac", ".wma", ".webm"}
-)
 MANIFEST_NAME = "_shore.json"
 
 
@@ -47,13 +44,10 @@ def completed_stages(tar_path: Path) -> set[str]:
     return set(cast(list[str], manifest["stages"]))
 
 
-def iter_audio(
-    tar_path: Path, extensions: set[str] | None = None
-) -> Iterator[AudioRecord]:
-    allowed = set(AUDIO_EXTS) if extensions is None else extensions
+def iter_audio(tar_path: Path, extensions: set[str]) -> Iterator[AudioRecord]:
     with tarfile.open(tar_path, "r") as tar:
         for member in tar:
-            if not member.isfile() or Path(member.name).suffix.lower() not in allowed:
+            if not member.isfile() or Path(member.name).suffix.lower() not in extensions:
                 continue
             handle = tar.extractfile(member)
             assert handle is not None
@@ -63,19 +57,15 @@ def iter_audio(
 
 
 def transform_tar(
-    tar_path: Path,
-    operator: Operator,
-    extensions: set[str] | None = None,
-    stage: str | None = None,
+    tar_path: Path, operator: Operator, extensions: set[str], stage: str
 ) -> int:
     """Stream every audio member through operator and replace the tar atomically.
 
     A completed stage is skipped on rerun; the manifest inside the tar records it.
     Returns the number of audio members written.
     """
-    allowed = set(AUDIO_EXTS) if extensions is None else extensions
     stages = completed_stages(tar_path)
-    if stage is not None and stage in stages:
+    if stage in stages:
         logger.info("Stage %s already done for %s", stage, tar_path.name)
         return 0
 
@@ -92,7 +82,7 @@ def transform_tar(
                     dst.addfile(member)
                     continue
                 assert handle is not None
-                if Path(member.name).suffix.lower() not in allowed:
+                if Path(member.name).suffix.lower() not in extensions:
                     dst.addfile(member, handle)
                     continue
 
@@ -110,12 +100,11 @@ def transform_tar(
                     dst.addfile(info, BytesIO(output.data))
                     count += 1
 
-            if stage is not None:
-                stages.add(stage)
-                payload = json.dumps({"stages": sorted(stages)}).encode("utf-8")
-                info = tarfile.TarInfo(MANIFEST_NAME)
-                info.size = len(payload)
-                dst.addfile(info, BytesIO(payload))
+            stages.add(stage)
+            payload = json.dumps({"stages": sorted(stages)}).encode("utf-8")
+            info = tarfile.TarInfo(MANIFEST_NAME)
+            info.size = len(payload)
+            dst.addfile(info, BytesIO(payload))
 
         tmp_path.replace(tar_path)
     finally:

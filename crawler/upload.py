@@ -1,13 +1,18 @@
 """Upload packed tars to object storage and remove the local copies."""
 
-import concurrent.futures
 import logging
 import os
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import boto3
 from botocore.config import Config
+from botocore.exceptions import BotoCoreError, ClientError
+
+if TYPE_CHECKING:
+    from botocore.client import BaseClient
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +27,7 @@ S3_BUCKET = os.environ.get("S3_BUCKET")
 S3_PREFIX = os.environ.get("S3_PREFIX", "")
 
 
-def build_s3_client():
+def build_s3_client() -> "BaseClient":
     for name, value in (
         ("S3_ENDPOINT", S3_ENDPOINT),
         ("S3_KEY", S3_KEY),
@@ -44,14 +49,14 @@ def build_s3_client():
     )
 
 
-def upload_tar(s3, tar_path: Path) -> bool:
+def upload_tar(s3: "BaseClient", tar_path: Path) -> bool:
     lang = tar_path.name.split("_")[0]
     key = f"{S3_PREFIX}{lang}/{tar_path.name}"
     logger.info("Uploading %s to s3://%s/%s", tar_path.name, S3_BUCKET, key)
     try:
         s3.upload_file(str(tar_path), S3_BUCKET, key, ExtraArgs={"ACL": "private"})
         return True
-    except Exception:
+    except (BotoCoreError, ClientError, OSError):
         logger.exception("Upload failed: %s", tar_path.name)
         return False
 
@@ -67,8 +72,8 @@ def start_monitor() -> None:
     logger.info("Watching %s for tars", WATCH_DIR)
     s3 = build_s3_client()
     processing: set[str] = set()
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS)
-    future_to_name: dict[concurrent.futures.Future, str] = {}
+    executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+    future_to_name: dict[Future[bool], str] = {}
     while True:
         try:
             for future in [f for f in future_to_name if f.done()]:

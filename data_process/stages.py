@@ -14,6 +14,10 @@ OPUS_BITRATE = "128k"
 DEFAULT_UVR_MODEL = "htdemucs"
 DEFAULT_SLICER_THRESHOLD = -30.0
 DEFAULT_MIN_LENGTH_MS = 10000
+SLICER_SAMPLE_RATE = 44100
+SLICER_MIN_INTERVAL_MS = 500
+SLICER_HOP_SIZE_MS = 10
+SLICER_MAX_SIL_KEPT_MS = 500
 
 
 def run_ffmpeg(data: bytes, arguments: list[str]) -> bytes:
@@ -66,16 +70,19 @@ def build_slicer(params: dict[str, object]) -> Operator:
     def slice_audio(record: AudioRecord) -> list[AudioRecord]:
         pcm = run_ffmpeg(
             record.data,
-            ["-i", "pipe:0", "-ac", "1", "-ar", "44100", "-f", "wav", "pipe:1"],
+            [
+                "-i", "pipe:0", "-ac", "1", "-ar", str(SLICER_SAMPLE_RATE),
+                "-f", "wav", "pipe:1",
+            ],
         )
         waveform, samplerate = sf.read(BytesIO(pcm))
         slicer = slicer_cls(
             sr=samplerate,
             threshold=threshold,
             min_length=min_length,
-            min_interval=500,
-            hop_size=10,
-            max_sil_kept=500,
+            min_interval=SLICER_MIN_INTERVAL_MS,
+            hop_size=SLICER_HOP_SIZE_MS,
+            max_sil_kept=SLICER_MAX_SIL_KEPT_MS,
         )
         chunks = slicer.slice(np.asarray(waveform))
         stem = str(Path(record.audio_id).with_suffix(""))

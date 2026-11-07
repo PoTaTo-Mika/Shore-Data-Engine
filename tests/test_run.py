@@ -14,6 +14,7 @@ from unittest.mock import patch
 import httpx
 
 from data_process.annotation import load_completed
+from data_process.data_reader import Operator
 from engine.backends import (
     Config,
     Request,
@@ -201,13 +202,13 @@ class PipelineTests(unittest.TestCase):
                 calls.append(request.url.path)
                 return httpx.Response(200, json={"text": "hello"})
 
-            def fake_start(services: dict[str, Config], dry_run: bool = False):
+            def fake_start(services: dict[str, Config]) -> list[Service]:
                 client = httpx.Client(transport=httpx.MockTransport(handler))
                 return [Service("omni", SERVICE, client=client)]
 
             operator_calls: list[str] = []
 
-            def fake_build_operator(task: str, model: Config):
+            def fake_build_operator(task: str, model: Config) -> Operator:
                 operator_calls.append(task)
                 return lambda record: [record]
 
@@ -257,7 +258,7 @@ class PipelineTests(unittest.TestCase):
                 calls.append(request.url.path)
                 return httpx.Response(200, json={"text": "hello"})
 
-            def fake_start(services: dict[str, Config], dry_run: bool = False):
+            def fake_start(services: dict[str, Config]) -> list[Service]:
                 client = httpx.Client(transport=httpx.MockTransport(handler))
                 return [Service("omni", SERVICE, client=client)]
 

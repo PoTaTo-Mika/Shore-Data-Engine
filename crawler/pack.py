@@ -1,5 +1,3 @@
-"""Transcode crawler downloads to opus, then pack buckets into fixed-size tars."""
-
 import argparse
 import logging
 import os
@@ -152,7 +150,7 @@ def scan_buckets(watch_dir: Path) -> dict[str, list[Path]]:
 
 
 def split_into_batches(
-    files: list[Path], max_bytes: int, now: float, stale_secs: float | None
+    files: list[Path], max_bytes: int, now: float, stale_secs: float
 ) -> tuple[list[list[Path]], list[Path]]:
     batches: list[list[Path]] = []
     batch: list[Path] = []
@@ -172,7 +170,7 @@ def split_into_batches(
     rest: list[Path] = []
     if batch:
         oldest = min(path.stat().st_mtime for path in batch)
-        if stale_secs is not None and now - oldest >= stale_secs:
+        if now - oldest >= stale_secs:
             batches.append(batch)
         else:
             rest = batch
@@ -197,27 +195,23 @@ def pack_batch(watch_dir: Path, bucket: str, batch: list[Path]) -> Path:
     return tar_path
 
 
-def cleanup_files(files: list[Path]) -> None:
-    for path in files:
-        try:
-            path.unlink()
-        except OSError as exc:
-            logger.warning("Cannot remove %s: %s", path, exc)
-
-
 def pack_bucket(
     watch_dir: Path,
     bucket: str,
     files: list[Path],
     now: float,
-    stale_secs: float | None,
+    stale_secs: float,
 ) -> list[Path]:
     batches, rest = split_into_batches(files, TAR_MAX_SIZE, now, stale_secs)
     packed = []
     for batch in batches:
         packed.append(pack_batch(watch_dir, bucket, batch))
-        cleanup_files(batch)
-    if rest and stale_secs is not None:
+        for path in batch:
+            try:
+                path.unlink()
+            except OSError as exc:
+                logger.warning("Cannot remove %s: %s", path, exc)
+    if rest:
         oldest = min(path.stat().st_mtime for path in rest)
         logger.info(
             "Bucket %s holds %d files below threshold; forced pack in %.0f minutes",

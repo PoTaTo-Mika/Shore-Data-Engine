@@ -6,7 +6,7 @@ import os
 import re
 import subprocess
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast, get_args
 
 import yaml
 
@@ -22,16 +22,16 @@ from data_process.stages import build_slicer, build_uvr
 from engine.backends import (
     Config,
     HttpTranscriber,
-    Transcriber,
     start_services,
     stop_services,
 )
 
 logger = logging.getLogger(__name__)
 
-ENV_PATTERN = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)(?::-([^}]*))?\}")
+Task = Literal["uvr", "slicer", "asr"]
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "run.yaml"
-TASKS = frozenset({"uvr", "slicer", "asr"})
+ENV_PATTERN = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)(?::-([^}]*))?\}")
+TASKS = frozenset(get_args(Task))
 
 
 def expand_env(value: object) -> object:
@@ -79,7 +79,7 @@ def engine_revision(path: Path) -> str | None:
     return result.stdout.strip()
 
 
-def build_operator(task: str, model: Config) -> Operator:
+def build_operator(task: Task, model: Config) -> Operator:
     params = cast(dict[str, object], model.get("params", {}))
     if task == "uvr":
         return build_uvr(params)
@@ -120,7 +120,7 @@ def run_pipeline(
     services = start_services(cast(dict[str, Config], cfg["services"]))
     try:
         service_by_name = {service.name: service for service in services}
-        transcribers: dict[str, Transcriber] = {}
+        transcribers: dict[str, HttpTranscriber] = {}
         operators: dict[str, Operator] = {}
         completed = load_completed(output)
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -132,7 +132,7 @@ def run_pipeline(
                     break
                 for stage in stages:
                     name = cast(str, stage["name"])
-                    task = cast(str, stage["task"])
+                    task = cast(Task, stage["task"])
                     if only and name != only:
                         continue
                     model = models[cast(str, stage["model"])]
