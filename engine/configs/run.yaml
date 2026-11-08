@@ -4,6 +4,10 @@ output_name: annotations.jsonl
 audio_extensions: [.opus, .wav, .mp3, .flac, .m4a, .ogg, .aac]
 engine_path: engine/sglang-omni
 
+# Audio members processed in parallel per tar by stage1/stage2.
+# UVR serializes GPU inference with a lock while CPU-side ffmpeg runs concurrently.
+stage_workers: ${SHORE_STAGE_WORKERS:-4}
+
 # Shared service settings; the selected ASR model supplies the command.
 # Remove that command to attach to an already running server.
 services:

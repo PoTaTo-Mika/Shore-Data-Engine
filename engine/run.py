@@ -18,6 +18,7 @@ from data_process.data_reader import (
     iter_tars,
     transform_tar,
 )
+from data_process.state import load_state, pipeline_lock
 from data_process.stages import build_slicer, build_uvr
 from engine.backends import (
     Config,
@@ -33,6 +34,7 @@ Task = Literal["uvr", "slicer", "asr"]
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "run.yaml"
 ENV_PATTERN = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)(?::-([^}]*))?\}")
 TASKS = frozenset(get_args(Task))
+ASR_CURSOR_INTERVAL = 50
 
 
 def expand_env(value: object) -> object:
@@ -80,6 +82,29 @@ def engine_revision(path: Path) -> str | None:
     return result.stdout.strip()
 
 
+def show_status(root: Path, output: Path) -> None:
+    state = load_state(root)
+    if state.stage_cursors:
+        for tar_name, entries in state.stage_cursors.items():
+            for stage, cursor in entries.items():
+                logger.info(
+                    "Cursor %s %s: member=%d written=%d",
+                    tar_name,
+                    stage,
+                    cursor.member,
+                    cursor.written,
+                )
+    else:
+        logger.info("No stage cursors in progress")
+    logger.info("ASR tars completed: %d", len(state.asr_tars))
+    logger.info("ASR last annotation: %s", state.asr_last)
+    lines = 0
+    if output.exists():
+        with output.open(encoding="utf-8") as handle:
+            lines = sum(1 for line in handle if line.strip())
+    logger.info("Annotations: %d", lines)
+
+
 def build_operator(task: Task, model: Config) -> Operator:
     params = cast(dict[str, object], model.get("params", {}))
     if task == "uvr":
@@ -110,6 +135,9 @@ def run_pipeline(
     all_services = cast(dict[str, Config], cfg["services"])
     models = cast(dict[str, Config], cfg["models"])
     output = root / cast(str, cfg["output_name"])
+    workers = int(cast(str | int, cfg.get("stage_workers", 4)))
+    if workers < 1:
+        raise ValueError(f"stage_workers must be >= 1, got {workers}")
     stages = [
         dict(stage)
         for stage in cast(list[Config], cfg["stages"])
@@ -135,7 +163,9 @@ def run_pipeline(
                 stage["model"],
             )
         logger.info("ASR models: %s", ", ".join(asr_keys))
-        logger.info("Dry run: %d tars", len(list(iter_tars(root))))
+        logger.info(
+            "Dry run: %d tars, %d stage workers", len(list(iter_tars(root))), workers
+        )
         return
 
     services_config: dict[str, Config] = {}
@@ -151,67 +181,104 @@ def run_pipeline(
             config["command"] = entry["command"]
         services_config[service_name] = config
 
-    services: list[Service] | None = None
-    completed = load_completed(output)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    annotated = 0
-    try:
-        for stage in stages:
-            name = cast(str, stage["name"])
-            task = cast(Task, stage["task"])
-            model_config = models[cast(str, stage["model"])]
-            tars = list(iter_tars(root))
-            logger.info("Stage %s processing %d tars", name, len(tars))
+    with pipeline_lock(root):
+        state = load_state(root)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        completed = load_completed(output)
+        known_tars = {tar_name for tar_name, _ in completed}
+        state.asr_tars = [tar for tar in state.asr_tars if tar in known_tars]
+        services: list[Service] | None = None
+        annotated = 0
+        try:
+            for stage in stages:
+                name = cast(str, stage["name"])
+                task = cast(Task, stage["task"])
+                model_config = models[cast(str, stage["model"])]
+                tars = list(iter_tars(root))
+                logger.info("Stage %s processing %d tars", name, len(tars))
 
-            if task != "asr":
-                operator: Operator | None = None
-                for tar_path in tars:
-                    if name in completed_stages(tar_path):
-                        logger.info("Stage %s already done for %s", name, tar_path.name)
-                        continue
-                    if operator is None:
-                        operator = build_operator(task, model_config)
-                    members = transform_tar(tar_path, operator, extensions, name)
-                    logger.info(
-                        "Stage %s rewrote %s with %d audio members",
-                        name,
-                        tar_path.name,
-                        members,
-                    )
-                continue
-
-            if services is None:
-                services = start_services(services_config)
-            service_by_name = {service.name: service for service in services}
-            service_name = cast(str, stage["service"])
-            if service_name not in service_by_name:
-                raise ValueError(f"Unknown service: {service_name}")
-            transcriber = HttpTranscriber(service_by_name[service_name], model_config)
-
-            with output.open("a", encoding="utf-8") as handle:
-                for tar_path in tars:
-                    if limit and annotated >= limit:
-                        break
-                    for record in iter_audio(tar_path, extensions):
-                        key = (tar_path.name, record.audio_id)
-                        if key in completed:
+                if task != "asr":
+                    operator: Operator | None = None
+                    for tar_path in tars:
+                        if name in completed_stages(tar_path):
+                            logger.info(
+                                "Stage %s already done for %s", name, tar_path.name
+                            )
                             continue
+                        if operator is None:
+                            operator = build_operator(task, model_config)
+                        members = transform_tar(
+                            tar_path,
+                            operator,
+                            extensions,
+                            name,
+                            workers=workers,
+                            state=state,
+                        )
+                        logger.info(
+                            "Stage %s rewrote %s with %d audio members",
+                            name,
+                            tar_path.name,
+                            members,
+                        )
+                    continue
+
+                if services is None:
+                    services = start_services(services_config)
+                service_by_name = {service.name: service for service in services}
+                service_name = cast(str, stage["service"])
+                if service_name not in service_by_name:
+                    raise ValueError(f"Unknown service: {service_name}")
+                transcriber = HttpTranscriber(
+                    service_by_name[service_name], model_config
+                )
+                if state.asr_last:
+                    logger.info(
+                        "ASR cursor at %s/%s",
+                        state.asr_last[0],
+                        state.asr_last[1],
+                    )
+
+                with output.open("a", encoding="utf-8") as handle:
+                    for tar_path in tars:
                         if limit and annotated >= limit:
                             break
-                        text = transcriber.transcribe(record.audio_id, record.data)
-                        append_annotation(
-                            handle,
-                            Annotation(
-                                tar_name=tar_path.name,
-                                audio_id=record.audio_id,
-                                asr_text=text,
-                            ),
-                        )
-                        completed.add(key)
-                        annotated += 1
-                    logger.info("Stage %s annotated %s", name, tar_path.name)
-    finally:
-        stop_services(services or [])
+                        if tar_path.name in state.asr_tars:
+                            logger.info(
+                                "Stage %s already annotated %s", name, tar_path.name
+                            )
+                            continue
+                        tar_complete = True
+                        for record in iter_audio(tar_path, extensions):
+                            key = (tar_path.name, record.audio_id)
+                            if key in completed:
+                                continue
+                            if limit and annotated >= limit:
+                                tar_complete = False
+                                break
+                            text = transcriber.transcribe(
+                                record.audio_id, record.data
+                            )
+                            append_annotation(
+                                handle,
+                                Annotation(
+                                    tar_name=tar_path.name,
+                                    audio_id=record.audio_id,
+                                    asr_text=text,
+                                ),
+                            )
+                            completed.add(key)
+                            annotated += 1
+                            state.asr_last = key
+                            if annotated % ASR_CURSOR_INTERVAL == 0:
+                                state.save()
+                        if tar_complete:
+                            state.asr_tars.append(tar_path.name)
+                        state.save()
+                        logger.info("Stage %s annotated %s", name, tar_path.name)
+        finally:
+            stop_services(services or [])
+            state.save()
 
 
 def main() -> None:
@@ -227,10 +294,16 @@ def main() -> None:
         "--limit", type=int, default=0, help="Max annotations, 0 means all"
     )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--status", action="store_true", help="Show cursors and exit")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    cfg = load_config(args.config)
+    if args.status:
+        root = Path(cast(str, cfg["data_root"]))
+        show_status(root, root / cast(str, cfg["output_name"]))
+        return
     run_pipeline(
-        load_config(args.config), args.stage, args.limit, args.dry_run, args.model
+        cfg, args.stage, args.limit, args.dry_run, args.model
     )
 
 

@@ -14,6 +14,7 @@ import httpx
 
 from data_process.annotation import load_completed
 from data_process.data_reader import AudioRecord, Operator
+from data_process.state import load_state, pipeline_lock
 from engine.backends import (
     Config,
     Request,
@@ -58,6 +59,7 @@ def pipeline_config(root: Path) -> Config:
         "data_root": str(root),
         "output_name": "annotations.jsonl",
         "audio_extensions": [".opus"],
+        "stage_workers": 3,
         "services": {"omni": SERVICE},
         "models": {
             "demucs": {},
@@ -397,3 +399,44 @@ class PipelineTests(unittest.TestCase):
                     "asr_request",
                 ],
             )
+
+    def test_stage_workers_and_state_are_forwarded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            make_audio_tar(root / "en_000.tar", ("a.opus",))
+            cfg = pipeline_config(root)
+            with patch("engine.run.transform_tar", return_value=1) as transform, patch(
+                "engine.run.build_operator", return_value=lambda record: [record]
+            ):
+                run_pipeline(cfg, "stage1", 0, False)
+            kwargs = transform.call_args.kwargs
+            self.assertEqual(kwargs["workers"], 3)
+            self.assertIsNotNone(kwargs["state"])
+
+    def test_asr_cursor_records_completed_tars(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            make_audio_tar(root / "en_000.tar", ("a.opus", "b.opus"))
+            cfg = pipeline_config(root)
+
+            def handler(request: httpx.Request) -> httpx.Response:
+                return httpx.Response(200, json={"text": "hello"})
+
+            def fake_start(services: dict[str, Config]) -> list[Service]:
+                client = httpx.Client(transport=httpx.MockTransport(handler))
+                return [Service("omni", SERVICE, client=client)]
+
+            with patch("engine.run.start_services", side_effect=fake_start):
+                run_pipeline(cfg, "stage3", 0, False)
+            state = load_state(root)
+            self.assertEqual(state.asr_tars, ["en_000.tar"])
+            self.assertEqual(state.asr_last, ("en_000.tar", "b.opus"))
+            self.assertEqual(len(load_completed(root / "annotations.jsonl")), 2)
+
+    def test_second_pipeline_instance_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = pipeline_config(root)
+            with pipeline_lock(root):
+                with self.assertRaises(RuntimeError):
+                    run_pipeline(cfg, "stage1", 0, False)
