@@ -1,6 +1,5 @@
 """Model service lifecycle and byte-level ASR requests."""
 
-import base64
 import logging
 import mimetypes
 import os
@@ -16,12 +15,8 @@ logger = logging.getLogger(__name__)
 
 Config = dict[str, object]
 
-ALLOWED_FIELDS: dict[str, frozenset[str]] = {
-    "/v1/audio/transcriptions": frozenset({"language", "prompt", "response_format"}),
-    "/v1/chat/completions": frozenset(
-        {"modalities", "max_tokens", "temperature", "top_p", "seed", "stop"}
-    ),
-}
+ASR_ENDPOINT = "/v1/audio/transcriptions"
+ASR_FIELDS = frozenset({"language", "prompt", "response_format"})
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -29,60 +24,34 @@ class Request:
     url: str
     data: dict[str, str] | None = None
     files: dict[str, tuple[str, bytes, str]] | None = None
-    body: dict[str, object] | None = None
 
 
 def build_request(
     model: Config, audio_id: str, data: bytes, base_url: str
 ) -> Request:
-    endpoint = cast(str, model["endpoint"])
-    allowed = ALLOWED_FIELDS.get(endpoint)
-    if allowed is None:
-        raise ValueError(f"Unsupported endpoint: {endpoint}")
-    params = cast(dict[str, object], model.get("params", {}))
-    unknown = set(params) - allowed
+    endpoint = cast(str, model.get("endpoint", ASR_ENDPOINT))
+    if endpoint != ASR_ENDPOINT:
+        raise ValueError(f"ASR only supports {ASR_ENDPOINT}, got {endpoint}")
+    transport = cast(str, model.get("transport", "multipart"))
+    if transport != "multipart":
+        raise ValueError(f"ASR only supports multipart transport, got {transport}")
+
+    raw = cast(dict[str, object], model.get("params", {}))
+    params = {key: value for key, value in raw.items() if value is not None}
+    unknown = set(params) - ASR_FIELDS
     if unknown:
-        raise ValueError(f"Unmapped fields for {endpoint}: {sorted(unknown)}")
+        raise ValueError(f"Unmapped ASR fields: {sorted(unknown)}")
+    if params.get("response_format", "json") != "json":
+        raise ValueError("ASR only accepts response_format=json")
 
-    payload: dict[str, object] = {"model": cast(str, model["model"])}
-    payload.update({k: v for k, v in params.items() if v is not None})
-    url = base_url.rstrip("/") + endpoint
-    transport = cast(str, model["transport"])
+    payload: dict[str, object] = {"model": cast(str, model["model"]), **params}
     filename = Path(audio_id).name
-
-    if endpoint == "/v1/audio/transcriptions":
-        if transport != "multipart":
-            raise ValueError("Transcription endpoint only supports multipart transport")
-        mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-        return Request(
-            url=url,
-            data={k: str(v) for k, v in payload.items()},
-            files={"file": (filename, data, mime)},
-        )
-
-    if transport != "base64":
-        raise ValueError("Chat endpoint only supports base64 transport")
-    audio_format = Path(filename).suffix.lower().lstrip(".")
-    if audio_format not in {"wav", "mp3"}:
-        raise ValueError(f"base64 transport expects wav or mp3, got {audio_format}")
-    body = {
-        **payload,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_audio",
-                        "input_audio": {
-                            "data": base64.b64encode(data).decode("ascii"),
-                            "format": audio_format,
-                        },
-                    }
-                ],
-            }
-        ],
-    }
-    return Request(url=url, body=body)
+    mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    return Request(
+        url=base_url.rstrip("/") + ASR_ENDPOINT,
+        data={key: str(value) for key, value in payload.items()},
+        files={"file": (filename, data, mime)},
+    )
 
 
 def post(client: httpx.Client, request: Request, retry: Config) -> dict[str, object]:
@@ -97,7 +66,6 @@ def post(client: httpx.Client, request: Request, retry: Config) -> dict[str, obj
                 request.url,
                 data=request.data,
                 files=request.files,
-                json=request.body,
             )
         except httpx.TransportError as exc:
             if attempt >= attempts:
@@ -118,12 +86,8 @@ def post(client: httpx.Client, request: Request, retry: Config) -> dict[str, obj
         return cast(dict[str, object], response.json())
 
 
-def extract_text(endpoint: str, payload: dict[str, object]) -> str:
-    if endpoint == "/v1/audio/transcriptions":
-        return cast(str, payload["text"]).strip()
-    choices = cast(list[dict[str, object]], payload["choices"])
-    message = cast(dict[str, object], choices[0]["message"])
-    return cast(str, message["content"]).strip()
+def extract_text(payload: dict[str, object]) -> str:
+    return cast(str, payload["text"]).strip()
 
 
 @dataclass
@@ -185,8 +149,7 @@ class HttpTranscriber:
 
     def transcribe(self, audio_id: str, data: bytes) -> str:
         request = build_request(self.model, audio_id, data, self.base_url)
-        response = post(self.client, request, self.retry)
-        return extract_text(cast(str, self.model["endpoint"]), response)
+        return extract_text(post(self.client, request, self.retry))
 
 
 def start_services(services: dict[str, Config]) -> list[Service]:

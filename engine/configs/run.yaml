@@ -4,14 +4,14 @@ output_name: annotations.jsonl
 audio_extensions: [.opus, .wav, .mp3, .flac, .m4a, .ogg, .aac]
 engine_path: engine/sglang-omni
 
-# Services are launched in this order; remove command to attach to a running one.
+# Shared service settings; the selected ASR model supplies the command.
+# Remove that command to attach to an already running server.
 services:
   omni:
-    command: [sgl-omni, serve, --model-path, Qwen/Qwen3-ASR-1.7B, --port, "8000"]
     base_url: ${OMNI_BASE_URL:-http://127.0.0.1:8000}
     api_key_env: OMNI_API_KEY
     health_path: /health
-    startup_timeout_s: 300
+    startup_timeout_s: 900
     timeout_s: 120
     retry:
       max_attempts: 5
@@ -19,17 +19,49 @@ services:
       status_codes: [429, 500, 502, 503, 504]
 
 models:
-  demucs:
-    params: {model: htdemucs}
-  rms_vad:
-    params: {threshold: -30.0, min_length: 10000}
+  # Local operators for stage1 / stage2.
+  demucs: {params: {model: htdemucs}}
+  rms_vad: {params: {threshold: -30.0, min_length: 10000}}
+
+  # stage3 options: pick one with --model <key> or stages[2].model.
+  # Every entry is plain ASR: multipart /v1/audio/transcriptions, response_format=json.
+  # Checkpoints present in checkpoints/ are referenced by local path; the rest
+  # use their HuggingFace repo id and are fetched by sglang-omni on first use.
   qwen3_asr:
     model: Qwen/Qwen3-ASR-1.7B
-    endpoint: /v1/audio/transcriptions
-    transport: multipart
     params: {language: zh, response_format: json}
+    command: [sgl-omni, serve, --model-path, checkpoints/Qwen3-ASR-1.7B, --model-name, Qwen/Qwen3-ASR-1.7B, --port, "8000"]
+  fun_asr_nano:
+    model: FunAudioLLM/Fun-ASR-Nano-2512-hf
+    params: {response_format: json}
+    command: [sgl-omni, serve, --model-path, FunAudioLLM/Fun-ASR-Nano-2512-hf, --port, "8000"]
+  ark_asr:
+    model: AutoArk-AI/ARK-ASR-3B
+    params: {response_format: json}
+    command: [sgl-omni, serve, --model-path, AutoArk-AI/ARK-ASR-3B, --port, "8000"]
+  nemotron_3_5_asr:
+    model: nvidia/nemotron-3.5-asr-streaming-0.6b
+    params: {response_format: json}
+    command: [sgl-omni, serve, --model-path, nvidia/nemotron-3.5-asr-streaming-0.6b, --port, "8000"]
+  nemotron_transcribe:
+    model: nemotron-transcribe
+    params: {response_format: json}
+    command: [sgl-omni, serve, --model-path, nvidia/Nemotron-3.5-Transcribe-30B-A4B, --model-name, nemotron-transcribe, --mem-fraction-static, "0.85", --port, "8000"]
+  ming3_asr:
+    model: inclusionAI/Ming-3.0-asr-tiny
+    params: {response_format: json}
+    command: [sgl-omni, serve, --model-path, inclusionAI/Ming-3.0-asr-tiny, --port, "8000"]
+  whisper_large_v3:
+    model: openai/whisper-large-v3
+    params: {response_format: json}
+    # Small capture set keeps cold start under the server's 600s readiness limit.
+    command: [sgl-omni, serve, --model-path, checkpoints/whisper-large-v3, --model-name, openai/whisper-large-v3, --asr.engine.max_running_requests, "2", --asr.engine.cuda_graph_max_bs, "2", --port, "8000"]
+  moss_td:
+    model: OpenMOSS-Team/MOSS-Transcribe-Diarize
+    params: {response_format: json}
+    command: [sgl-omni, serve, --model-path, checkpoints/MOSS-Transcribe-Diarize, --model-name, OpenMOSS-Team/MOSS-Transcribe-Diarize, --asr.engine.max_running_requests, "4", --asr.engine.cuda_graph_max_bs, "4", --mem-fraction-static, "0.80", --port, "8000"]
 
-# stage1 UVR, stage2 Slicer, stage3 ASR; each tar finishes all stages serially.
+# stage1 UVR, stage2 Slicer, stage3 ASR; each stage covers all tars before the next.
 stages:
   - {name: stage1, task: uvr, model: demucs}
   - {name: stage2, task: slicer, model: rms_vad}

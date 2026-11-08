@@ -1,6 +1,6 @@
 ## Shore-Data-Engine
 
-面向语音数据集的一体化流水线：各站点爬虫保持原样产出原始音频，`crawler.pack` 统一转码 Opus 并按固定体积打成 tar，`engine.run` 按配置拉起服务，对 tar 内音频串行执行 stage1/2/3，最终流式写出 jsonl 标注。
+面向语音数据集的一体化流水线：各站点爬虫保持原样产出原始音频，`crawler.pack` 统一转码 Opus 并按固定体积打成 tar，`engine.run` 按 stage 顺序分批处理全部 tar——先 UVR、再 Slicer，最后才拉起 ASR 服务做转写，流式写出 jsonl 标注。
 
 ### 设计目标
 
@@ -8,7 +8,7 @@
 - 每个 stage 的模型可配置，`stages[].model` 指向 `models` 表中的条目。
 - stage1 归为 audio preprocess，当前实现是 UVR（Demucs 人声分离）；去混响等模型待引入后并入这一阶段。
 - stage2 做 VAD 切分，结果写回同一个 tar。
-- stage3 通过配置启动的后端服务发请求做 ASR，并维护 jsonl 作为数据映射。
+- stage3 通过配置启动的后端服务发请求做 ASR，并维护 jsonl 作为数据映射；具体权重在 `models` 表中用 `--model` 切换，stage3 只产出纯文本转写。服务在进入 stage3 前才启动，不与 stage1/2 的本地算子争抢显存。
 - 后续可能增加 stage4/5/6，但当前不提前抽象插件或注册机制，先把标准三件套做实。
 
 ### 流程
@@ -16,8 +16,8 @@
 ```text
 站点爬虫下载原始音频 (mp3/m4a/wav/...)
   → crawler.pack 统一转码 opus，按 opus 产物真实体积打 tar
-  → engine.run 按 services 声明顺序拉起服务并等待健康检查
-  → 每个 tar 串行执行 stage1 UVR / stage2 Slicer / stage3 ASR
+  → engine.run 按 stage 顺序遍历全部 tar：stage1 UVR 全部完成 → stage2 Slicer 全部完成
+  → 进入 stage3 前才拉起 ASR 服务并等待健康检查，逐条转写并流式写 jsonl
   → data/annotations.jsonl
 ```
 
@@ -38,6 +38,8 @@ tar 由 `crawler.pack` 产出，放在 `data/` 根目录：
 ```
 
 `audio_id` 是 tar 内成员路径（切分后的片段带序号）。后续新增特征只需在 `data_process.annotation.Annotation` 加字段；已写出的 `(tar_name, audio_id)` 在重跑时跳过。
+
+`asr_text` 保存服务端 `text` 字段的原始返回内容（仅去掉首尾空白），不做清洗或格式转换。部分模型（如 MOSS-TD）会在其中带时间戳与说话人标记，这是预期行为，供后续 TTS 等环节使用。
 
 ### 目录结构
 
@@ -96,9 +98,10 @@ python -m crawler.pack --once      # 只跑一轮
 3. 运行标注引擎。从仓库根目录执行：
 
 ```bash
-python -m engine.run --dry-run -c engine/configs/run.yaml   # 查看 stage 顺序与 tar 数量
+python -m engine.run --dry-run -c engine/configs/run.yaml   # 查看 stage 顺序、ASR 模型清单与 tar 数量
 python -m engine.run -c engine/configs/run.yaml             # 完整串行执行
 python -m engine.run --stage stage3 --limit 10             # 只跑 ASR，限制条数
+python -m engine.run --model whisper_large_v3 --stage stage3 --limit 10  # 换一个 ASR 权重
 ```
 
 `pip install -e .` 之后等价入口是 `shore`（`shore --dry-run` 等）。**不要**用 `python engine/run.py`：以文件路径运行会让包导入失效并抛 `ModuleNotFoundError`。
@@ -108,8 +111,9 @@ python -m engine.run --stage stage3 --limit 10             # 只跑 ASR，限制
 `engine/configs/run.yaml` 是唯一配置源，由 `load_config` 实际读取：
 
 - `data_root` / `output_name` / `audio_extensions`：数据根目录、jsonl 文件名、参与处理的音频扩展名。
-- `services`：按声明顺序启动；`command` 可选，删除即接管已运行的服务；另有 `base_url`、`health_path`、`startup_timeout_s`、`timeout_s`、`retry`。
-- `models`：模型表。stage 通过 `model` 引用表中的键；`endpoint` 支持 `/v1/audio/transcriptions`（multipart）与 `/v1/chat/completions`（base64）。
+- `services`：通用服务参数（`base_url`、`health_path`、`startup_timeout_s`、`timeout_s`、`retry`）。启动命令由所选 ASR 模型的 `command` 提供，且只在进入 ASR stage 时启动（只跑 `--stage stage1/stage2` 不会拉起服务）；删掉模型的 `command` 即接管已运行的服务。
+- `models`：模型表。`demucs` / `rms_vad` 是 stage1/2 的本地算子；其余 8 个条目是 stage3 可选的 ASR 权重，用 `--model <键>` 或改 `stages[2].model` 切换：`qwen3_asr`（默认）、`whisper_large_v3`、`moss_td`、`fun_asr_nano`、`ark_asr`、`nemotron_3_5_asr`、`nemotron_transcribe`、`ming3_asr`。每项含 `model`（请求体模型名）、`params`、`command`（sglang-omni 启动命令）；已在 `checkpoints/` 的三个权重用本地路径，其余用 HuggingFace repo id，首次启动自动拉取。
+- stage3 只做转写：统一走 `/v1/audio/transcriptions` 的 multipart 请求与 `response_format: json`，输出只有 `asr_text`。`verbose_json` / `srt` / `vtt`、流式、翻译、说话人分离等非纯文本能力会被 `build_request` 拒绝；想用某一权重的不同尺寸，改对应条目的 `--model-path` 与 `model` 即可。
 - `stages`：`stage1` / `stage2` / `stage3` 对应 `uvr` / `slicer` / `asr`，顺序即执行顺序；ASR stage 额外用 `service` 指定后端。
 
 `${VAR:-default}` 在加载时展开，例如 `OMNI_BASE_URL`、`OMNI_API_KEY`。pack 侧另有 `SHORE_DATA_DIR`、`SHORE_OPUS_BITRATE`、`SHORE_STABLE_SECONDS`、`SHORE_TRANSCODE_WORKERS`、`SHORE_DELETE_RAW`、`SHORE_TAR_MAX_SIZE_GB`、`SHORE_STALE_SECONDS`、`SHORE_SCAN_INTERVAL`；上传侧为 `S3_ENDPOINT`、`S3_KEY`、`S3_SECRET`、`S3_BUCKET`、`S3_PREFIX`。
@@ -124,7 +128,7 @@ python -m engine.run --dry-run
 
 - 转码失败：确认 `ffmpeg -encoders | grep libopus` 可用；失败文件会保留并重试。想重新转码（例如改了码率）删掉对应的 `.done` 标记。
 - 磁盘占用：默认同时保留 raw 与 opus，约翻倍；一次性爬取可用 `SHORE_DELETE_RAW=1`。
-- 服务未就绪：`startup_timeout_s` 内 `/health` 未返回 200 会退出，可手工启动服务并移除 `command`。
+- 服务未就绪：`startup_timeout_s` 内 `/health` 未返回 200 会退出，可手工启动服务并移除所选 ASR 模型的 `command`。
 - 幂等：tar 内 `_shore.json` 记录已完成阶段，jsonl 记录已标注成员，两者共同保证重跑不重复处理。
 
 ### 许可证

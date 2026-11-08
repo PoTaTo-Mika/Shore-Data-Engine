@@ -1,6 +1,5 @@
 """Tests for the config-driven serial tar pipeline."""
 
-import base64
 import io
 import json
 import os
@@ -14,7 +13,7 @@ from unittest.mock import patch
 import httpx
 
 from data_process.annotation import load_completed
-from data_process.data_reader import Operator
+from data_process.data_reader import AudioRecord, Operator
 from engine.backends import (
     Config,
     Request,
@@ -33,8 +32,6 @@ from engine.run import (
 
 ASR_MODEL: Config = {
     "model": "Qwen/Qwen3-ASR-1.7B",
-    "endpoint": "/v1/audio/transcriptions",
-    "transport": "multipart",
     "params": {"language": "zh", "response_format": "json"},
 }
 RETRY: Config = {"max_attempts": 3, "backoff_s": 0.0, "status_codes": [503]}
@@ -62,7 +59,14 @@ def pipeline_config(root: Path) -> Config:
         "output_name": "annotations.jsonl",
         "audio_extensions": [".opus"],
         "services": {"omni": SERVICE},
-        "models": {"demucs": {}, "rms_vad": {}, "asr": ASR_MODEL},
+        "models": {
+            "demucs": {},
+            "rms_vad": {},
+            "asr": {
+                **ASR_MODEL,
+                "command": ["sgl-omni", "serve", "--model-path", "Qwen/Qwen3-ASR-1.7B"],
+            },
+        },
         "stages": [
             {"name": "stage1", "task": "uvr", "model": "demucs"},
             {"name": "stage2", "task": "slicer", "model": "rms_vad"},
@@ -101,6 +105,33 @@ class ConfigTests(unittest.TestCase):
         else:
             self.assertIsNone(revision)
 
+    def test_repository_config_declares_all_asr_models(self) -> None:
+        cfg = load_config(
+            Path(__file__).resolve().parents[1] / "engine" / "configs" / "run.yaml"
+        )
+        models = cast(dict[str, Config], cfg["models"])
+        asr = {key: entry for key, entry in models.items() if "model" in entry}
+        self.assertEqual(
+            set(asr),
+            {
+                "qwen3_asr",
+                "fun_asr_nano",
+                "ark_asr",
+                "nemotron_3_5_asr",
+                "nemotron_transcribe",
+                "ming3_asr",
+                "whisper_large_v3",
+                "moss_td",
+            },
+        )
+        for key, entry in asr.items():
+            with self.subTest(model=key):
+                self.assertIn("--model-path", cast(list[str], entry["command"]))
+                self.assertEqual(
+                    cast(dict[str, object], entry["params"])["response_format"],
+                    "json",
+                )
+
 
 class RequestTests(unittest.TestCase):
     def test_transcription_payload_uses_bytes(self) -> None:
@@ -122,28 +153,18 @@ class RequestTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_request(model, "clip.wav", b"RIFF", "http://svc")
 
-    def test_chat_request_embeds_base64_audio(self) -> None:
-        model: Config = {
-            "model": "qwen3-omni",
-            "endpoint": "/v1/chat/completions",
-            "transport": "base64",
-            "params": {"modalities": ["text"]},
-        }
-        request = build_request(model, "clip.wav", b"RIFF", "http://svc")
-        body = cast(dict[str, object], request.body)
-        self.assertIn(base64.b64encode(b"RIFF").decode("ascii"), json.dumps(body))
+    def test_non_asr_endpoint_is_rejected(self) -> None:
+        model: Config = {**ASR_MODEL, "endpoint": "/v1/chat/completions"}
+        with self.assertRaises(ValueError):
+            build_request(model, "clip.wav", b"RIFF", "http://svc")
 
-    def test_extract_text_from_both_endpoints(self) -> None:
-        self.assertEqual(
-            extract_text("/v1/audio/transcriptions", {"text": " hi "}), "hi"
-        )
-        self.assertEqual(
-            extract_text(
-                "/v1/chat/completions",
-                {"choices": [{"message": {"content": " ok "}}]},
-            ),
-            "ok",
-        )
+    def test_non_text_response_format_is_rejected(self) -> None:
+        model: Config = {**ASR_MODEL, "params": {"response_format": "verbose_json"}}
+        with self.assertRaises(ValueError):
+            build_request(model, "clip.wav", b"RIFF", "http://svc")
+
+    def test_extract_text_returns_plain_text(self) -> None:
+        self.assertEqual(extract_text({"text": " hi "}), "hi")
 
     def test_retries_service_unavailable(self) -> None:
         calls: list[str] = []
@@ -282,3 +303,97 @@ class PipelineTests(unittest.TestCase):
             start.assert_not_called()
             build.assert_not_called()
             self.assertFalse((root / "annotations.jsonl").exists())
+
+    def test_selected_asr_model_supplies_service_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            make_audio_tar(root / "en_000.tar", ("a.opus",))
+            cfg = pipeline_config(root)
+            models = cast(dict[str, Config], cfg["models"])
+            alt: Config = {
+                **ASR_MODEL,
+                "model": "openai/whisper-large-v3",
+                "command": [
+                    "sgl-omni",
+                    "serve",
+                    "--model-path",
+                    "checkpoints/whisper-large-v3",
+                ],
+            }
+            models["alt"] = alt
+            started: list[dict[str, Config]] = []
+            bodies: list[bytes] = []
+
+            def handler(request: httpx.Request) -> httpx.Response:
+                bodies.append(request.content)
+                return httpx.Response(200, json={"text": "hello"})
+
+            def fake_start(services: dict[str, Config]) -> list[Service]:
+                started.append(services)
+                client = httpx.Client(transport=httpx.MockTransport(handler))
+                return [Service("omni", SERVICE, client=client)]
+
+            with patch("engine.run.start_services", side_effect=fake_start):
+                run_pipeline(cfg, "stage3", 0, False, "alt")
+
+            self.assertEqual(started[0]["omni"]["command"], alt["command"])
+            self.assertIn(b"openai/whisper-large-v3", bodies[0])
+
+    def test_non_asr_stage_starts_no_services(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = pipeline_config(Path(tmp))
+            with patch("engine.run.start_services", return_value=[]) as start:
+                run_pipeline(cfg, "stage1", 0, False)
+            start.assert_not_called()
+
+    def test_unknown_asr_model_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = pipeline_config(Path(tmp))
+            with self.assertRaises(ValueError):
+                run_pipeline(cfg, None, 0, True, "demucs")
+
+    def test_each_stage_covers_all_tars_before_the_next(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            make_audio_tar(root / "en_000.tar", ("a.opus",))
+            make_audio_tar(root / "en_001.tar", ("b.opus",))
+            cfg = pipeline_config(root)
+            events: list[str] = []
+
+            def handler(request: httpx.Request) -> httpx.Response:
+                events.append("asr_request")
+                return httpx.Response(200, json={"text": "hello"})
+
+            def fake_start(services: dict[str, Config]) -> list[Service]:
+                events.append("start_services")
+                client = httpx.Client(transport=httpx.MockTransport(handler))
+                return [Service("omni", SERVICE, client=client)]
+
+            def fake_build_operator(task: str, model: Config) -> Operator:
+                events.append(f"build:{task}")
+
+                def apply(record: AudioRecord) -> list[AudioRecord]:
+                    events.append(f"{task}:{record.tar_name}")
+                    return [record]
+
+                return apply
+
+            with patch("engine.run.start_services", side_effect=fake_start), patch(
+                "engine.run.build_operator", side_effect=fake_build_operator
+            ):
+                run_pipeline(cfg, None, 0, False)
+
+            self.assertEqual(
+                events,
+                [
+                    "build:uvr",
+                    "uvr:en_000.tar",
+                    "uvr:en_001.tar",
+                    "build:slicer",
+                    "slicer:en_000.tar",
+                    "slicer:en_001.tar",
+                    "start_services",
+                    "asr_request",
+                    "asr_request",
+                ],
+            )
