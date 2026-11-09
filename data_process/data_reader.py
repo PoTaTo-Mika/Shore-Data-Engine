@@ -10,7 +10,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import cast
 
-from data_process.state import PipelineState, StageCursor
+from data_process.state import append_record
 
 logger = logging.getLogger(__name__)
 
@@ -64,90 +64,65 @@ def transform_tar(
     operator: Operator,
     extensions: set[str],
     stage: str,
+    cursor_path: Path,
     workers: int = 1,
-    state: PipelineState | None = None,
 ) -> int:
-    """Apply operator to audio members in parallel batches and replace the tar atomically.
+    """Stream members through operator and rewrite the tar locally in place.
 
-    Output goes to a stage-specific partial tar. With ``state``, each committed member
-    advances a cursor so a rerun resumes from that member instead of redoing the tar.
-    The manifest inside the tar remains the completion mark.
+    There is no partial tar: the destination is written to a transient file and
+    replaces the source atomically, and it is removed on any interruption.
+    Member cursors are appended to jsonl as soon as they commit.
     Returns the number of audio members written.
     """
     assert workers >= 1
     stages = completed_stages(tar_path)
     if stage in stages:
         logger.info("Stage %s already done for %s", stage, tar_path.name)
-        if state is not None:
-            state.clear_cursor(tar_path.name, stage)
         return 0
 
-    partial = tar_path.with_name(f"{tar_path.name}.{stage}.partial")
-    saved = state.cursor(tar_path.name, stage) if state is not None else None
-    resume = saved is not None and partial.exists() and saved.member > 0
-    if resume:
-        assert saved is not None
-        cursor = saved
-        if partial.stat().st_size != cursor.partial_bytes:
-            with partial.open("r+b") as handle:
-                handle.truncate(cursor.partial_bytes)
-        logger.info(
-            "Resuming stage %s for %s at member %d",
-            stage,
-            tar_path.name,
-            cursor.member,
-        )
-        with tarfile.open(partial, "r") as done:
-            names = {
-                member.name
-                for member in done
-                if member.isfile() and member.name != MANIFEST_NAME
-            }
-    else:
-        partial.unlink(missing_ok=True)
-        names = set()
-        cursor = StageCursor()
-        if state is not None:
-            state.clear_cursor(tar_path.name, stage)
-
-    count = cursor.written
+    tmp_path = tar_path.with_name(f".{tar_path.name}.rewrite")
+    names: set[str] = set()
+    count = 0
     try:
-        with tarfile.open(tar_path, "r") as src, ThreadPoolExecutor(
-            max_workers=workers
-        ) as pool:
-            members = [member for member in src if member.name != MANIFEST_NAME]
-            for offset in range(cursor.member, len(members), workers):
-                batch = members[offset : offset + workers]
-                jobs: list[
-                    tuple[tarfile.TarInfo, AudioRecord | None, bytes | None]
-                ] = []
-                for member in batch:
-                    if not member.isfile():
-                        jobs.append((member, None, None))
-                        continue
-                    handle = src.extractfile(member)
-                    assert handle is not None
-                    data = handle.read()
-                    if Path(member.name).suffix.lower() in extensions:
-                        jobs.append(
-                            (
-                                member,
-                                AudioRecord(
-                                    tar_name=tar_path.name,
-                                    audio_id=member.name,
-                                    data=data,
-                                ),
-                                None,
+        with cursor_path.open("a", encoding="utf-8") as cursors:
+            with (
+                tarfile.open(tar_path, "r") as src,
+                tarfile.open(tmp_path, "w") as dst,
+                ThreadPoolExecutor(max_workers=workers) as pool,
+            ):
+                members = [member for member in src if member.name != MANIFEST_NAME]
+                for offset in range(0, len(members), workers):
+                    batch = members[offset : offset + workers]
+                    jobs: list[
+                        tuple[tarfile.TarInfo, AudioRecord | None, bytes | None]
+                    ] = []
+                    for member in batch:
+                        if not member.isfile():
+                            jobs.append((member, None, None))
+                            continue
+                        handle = src.extractfile(member)
+                        assert handle is not None
+                        data = handle.read()
+                        if Path(member.name).suffix.lower() in extensions:
+                            jobs.append(
+                                (
+                                    member,
+                                    AudioRecord(
+                                        tar_name=tar_path.name,
+                                        audio_id=member.name,
+                                        data=data,
+                                    ),
+                                    None,
+                                )
                             )
-                        )
-                    else:
-                        jobs.append((member, None, data))
+                        else:
+                            jobs.append((member, None, data))
 
-                audio = [record for _, record, _ in jobs if record is not None]
-                results = iter(pool.map(lambda record: list(operator(record)), audio))
-                for member, record, data in jobs:
-                    mode = "a" if partial.exists() else "w"
-                    with tarfile.open(partial, mode) as dst:
+                    audio = [record for _, record, _ in jobs if record is not None]
+                    results = iter(
+                        pool.map(lambda record: list(operator(record)), audio)
+                    )
+                    for index, (member, record, data) in enumerate(jobs):
                         if record is None:
                             dst.addfile(
                                 member, BytesIO(data) if data is not None else None
@@ -165,34 +140,26 @@ def transform_tar(
                                 info.mode = member.mode
                                 dst.addfile(info, BytesIO(output.data))
                                 count += 1
-                    cursor.member += 1
-                    cursor.partial_bytes = partial.stat().st_size
-                    cursor.written = count
-                    if state is not None:
-                        state.set_cursor(tar_path.name, stage, cursor)
+                        append_record(
+                            cursors,
+                            {
+                                "tar_name": tar_path.name,
+                                "stage": stage,
+                                "member": offset + index + 1,
+                                "written": count,
+                            },
+                        )
 
-            with tarfile.open(partial, "r") as done:
-                has_manifest = MANIFEST_NAME in done.getnames()
-            if not has_manifest:
                 stages.add(stage)
                 payload = json.dumps({"stages": sorted(stages)}).encode("utf-8")
-                with tarfile.open(partial, "a") as dst:
-                    info = tarfile.TarInfo(MANIFEST_NAME)
-                    info.size = len(payload)
-                    dst.addfile(info, BytesIO(payload))
-
-        partial.replace(tar_path)
-        if state is not None:
-            state.clear_cursor(tar_path.name, stage)
-    except Exception:
-        if state is None:
-            partial.unlink(missing_ok=True)
-        else:
-            logger.warning(
-                "Stage %s interrupted for %s; progress kept at member %d",
-                stage,
-                tar_path.name,
-                cursor.member,
+                info = tarfile.TarInfo(MANIFEST_NAME)
+                info.size = len(payload)
+                dst.addfile(info, BytesIO(payload))
+            tmp_path.replace(tar_path)
+            append_record(
+                cursors,
+                {"tar_name": tar_path.name, "stage": stage, "done": True},
             )
-        raise
+    finally:
+        tmp_path.unlink(missing_ok=True)
     return count

@@ -1,4 +1,4 @@
-"""Tests for streaming tar I/O and jsonl annotations."""
+"""Tests for streaming tar I/O and jsonl cursors."""
 
 import io
 import json
@@ -16,7 +16,7 @@ from data_process.data_reader import (
     iter_tars,
     transform_tar,
 )
-from data_process.state import PipelineState, load_state
+from data_process.state import CURSOR_NAME, iter_records, load_cursors
 
 
 def make_tar(path: Path, members: dict[str, bytes]) -> None:
@@ -34,6 +34,14 @@ def read_tar(path: Path) -> dict[str, bytes]:
             for member in tar
             if member.isfile()
         }
+
+
+def staging_files(root: Path) -> list[str]:
+    return [
+        path.name
+        for path in root.iterdir()
+        if path.name.endswith((".partial", ".rewrite"))
+    ]
 
 
 class TarReaderTests(unittest.TestCase):
@@ -59,7 +67,8 @@ class TarReaderTests(unittest.TestCase):
 
     def test_transform_tar_fans_out_and_marks_stage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            tar_path = Path(tmp) / "en_000.tar"
+            root = Path(tmp)
+            tar_path = root / "en_000.tar"
             make_tar(tar_path, {"album/a.opus": b"audio", "album/a.txt": b"text"})
 
             def segment(record: AudioRecord) -> list[AudioRecord]:
@@ -73,7 +82,10 @@ class TarReaderTests(unittest.TestCase):
                 ]
 
             self.assertEqual(
-                transform_tar(tar_path, segment, {".opus"}, "stage2"), 2
+                transform_tar(
+                    tar_path, segment, {".opus"}, "stage2", root / CURSOR_NAME
+                ),
+                2,
             )
             content = read_tar(tar_path)
             self.assertEqual(content["album/a_000.opus"], b"audio\x00")
@@ -83,16 +95,26 @@ class TarReaderTests(unittest.TestCase):
             self.assertEqual(
                 json.loads(content["_shore.json"]), {"stages": ["stage2"]}
             )
-            self.assertFalse(Path(str(tar_path) + ".tmp").exists())
+            self.assertEqual(staging_files(root), [])
+            records = list(iter_records(root / CURSOR_NAME))
+            self.assertEqual(
+                [(r["member"], r["written"]) for r in records[:2]], [(1, 2), (2, 2)]
+            )
+            self.assertTrue(records[-1].get("done"))
+            self.assertEqual(load_cursors(root / CURSOR_NAME), {})
 
             self.assertEqual(
-                transform_tar(tar_path, segment, {".opus"}, "stage2"), 0
+                transform_tar(
+                    tar_path, segment, {".opus"}, "stage2", root / CURSOR_NAME
+                ),
+                0,
             )
             self.assertEqual(set(read_tar(tar_path)), set(content))
 
     def test_duplicate_member_is_rejected_without_touching_tar(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            tar_path = Path(tmp) / "en_000.tar"
+            root = Path(tmp)
+            tar_path = root / "en_000.tar"
             original = {"album/a.opus": b"audio"}
             make_tar(tar_path, original)
 
@@ -100,9 +122,12 @@ class TarReaderTests(unittest.TestCase):
                 return [record, record]
 
             with self.assertRaises(ValueError):
-                transform_tar(tar_path, duplicate, {".opus"}, "stage1")
+                transform_tar(
+                    tar_path, duplicate, {".opus"}, "stage1", root / CURSOR_NAME
+                )
             self.assertEqual(read_tar(tar_path), original)
-            self.assertFalse(Path(str(tar_path) + ".tmp").exists())
+            self.assertEqual(staging_files(root), [])
+            self.assertEqual(list(iter_records(root / CURSOR_NAME)), [])
 
 
 class AnnotationTests(unittest.TestCase):
@@ -134,7 +159,8 @@ class AnnotationTests(unittest.TestCase):
 class ParallelTarTests(unittest.TestCase):
     def test_parallel_batches_preserve_member_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            tar_path = Path(tmp) / "en.tar"
+            root = Path(tmp)
+            tar_path = root / "en.tar"
             members = {
                 **{f"album/{i:02d}.opus": b"audio" for i in range(8)},
                 "album/notes.txt": b"text",
@@ -153,7 +179,15 @@ class ParallelTarTests(unittest.TestCase):
                 ]
 
             self.assertEqual(
-                transform_tar(tar_path, segment, {".opus"}, "stage2", workers=4), 16
+                transform_tar(
+                    tar_path,
+                    segment,
+                    {".opus"},
+                    "stage2",
+                    root / CURSOR_NAME,
+                    workers=4,
+                ),
+                16,
             )
             with tarfile.open(tar_path) as tar:
                 ordered = [member.name for member in tar if member.isfile()]
@@ -164,57 +198,75 @@ class ParallelTarTests(unittest.TestCase):
             ]
             self.assertEqual(ordered, expected + ["album/notes.txt", "_shore.json"])
             self.assertEqual(completed_stages(tar_path), {"stage2"})
+            self.assertEqual(staging_files(root), [])
 
-    def test_partial_tar_resumes_from_cursor(self) -> None:
+    def test_interrupted_stage_keeps_no_staging_data(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             tar_path = root / "en.tar"
             original = {f"album/{i}.opus": b"audio" for i in range(4)}
             make_tar(tar_path, original)
-            state = PipelineState(root=root)
             calls: list[str] = []
 
             def rename(record: AudioRecord) -> list[AudioRecord]:
                 calls.append(record.audio_id)
                 if record.audio_id == "album/2.opus":
                     raise RuntimeError("interrupted")
-                return [replace(record, audio_id=record.audio_id.replace(".opus", "_000.opus"))]
+                return [
+                    replace(
+                        record, audio_id=record.audio_id.replace(".opus", "_000.opus")
+                    )
+                ]
 
             with self.assertRaises(RuntimeError):
                 transform_tar(
-                    tar_path, rename, {".opus"}, "stage1", workers=1, state=state
+                    tar_path,
+                    rename,
+                    {".opus"},
+                    "stage1",
+                    root / CURSOR_NAME,
+                    workers=1,
                 )
-            cursor = state.cursor("en.tar", "stage1")
-            self.assertIsNotNone(cursor)
-            self.assertEqual((cursor.member, cursor.written), (2, 2))
-            self.assertTrue(tar_path.with_name("en.tar.stage1.partial").exists())
+            self.assertEqual(staging_files(root), [])
             self.assertEqual(read_tar(tar_path), original)
+            cursor = load_cursors(root / CURSOR_NAME)[("en.tar", "stage1")]
+            self.assertEqual((cursor.member, cursor.written), (2, 2))
 
             calls.clear()
 
             def healthy(record: AudioRecord) -> list[AudioRecord]:
                 calls.append(record.audio_id)
-                return [replace(record, audio_id=record.audio_id.replace(".opus", "_000.opus"))]
+                return [
+                    replace(
+                        record, audio_id=record.audio_id.replace(".opus", "_000.opus")
+                    )
+                ]
 
             self.assertEqual(
                 transform_tar(
-                    tar_path, healthy, {".opus"}, "stage1", workers=1, state=state
+                    tar_path,
+                    healthy,
+                    {".opus"},
+                    "stage1",
+                    root / CURSOR_NAME,
+                    workers=1,
                 ),
                 4,
             )
-            self.assertEqual(calls, ["album/2.opus", "album/3.opus"])
+            self.assertEqual(calls, [f"album/{i}.opus" for i in range(4)])
             content = read_tar(tar_path)
             self.assertEqual(
                 set(content),
                 {f"album/{i}_000.opus" for i in range(4)} | {"_shore.json"},
             )
             self.assertEqual(json.loads(content["_shore.json"]), {"stages": ["stage1"]})
-            self.assertFalse(tar_path.with_name("en.tar.stage1.partial").exists())
-            self.assertIsNone(load_state(root).cursor("en.tar", "stage1"))
+            self.assertEqual(staging_files(root), [])
+            self.assertEqual(load_cursors(root / CURSOR_NAME), {})
+            self.assertTrue(list(iter_records(root / CURSOR_NAME))[-1].get("done"))
 
 
 class ResumeTests(unittest.TestCase):
-    def test_torn_jsonl_tail_is_quarantined(self) -> None:
+    def test_torn_jsonl_tail_is_truncated_without_extra_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "annotations.jsonl"
             path.write_text(
@@ -228,4 +280,17 @@ class ResumeTests(unittest.TestCase):
                 {("a.tar", "a.opus"), ("a.tar", "b.opus")},
             )
             self.assertEqual(len(path.read_text(encoding="utf-8").splitlines()), 2)
-            self.assertTrue(Path(str(path) + ".bad").exists())
+            self.assertFalse(Path(str(path) + ".bad").exists())
+            with path.open("a", encoding="utf-8") as handle:
+                append_annotation(
+                    handle,
+                    Annotation(tar_name="a.tar", audio_id="c.opus", asr_text="ok"),
+                )
+            self.assertEqual(
+                load_completed(path),
+                {
+                    ("a.tar", "a.opus"),
+                    ("a.tar", "b.opus"),
+                    ("a.tar", "c.opus"),
+                },
+            )

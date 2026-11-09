@@ -1,97 +1,73 @@
-"""On-disk cursors and the single-run lock for the tar pipeline."""
+"""Append-only jsonl cursors and the single-run lock for the tar pipeline."""
 
 import fcntl
 import json
 import logging
-import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TextIO, cast
 
 logger = logging.getLogger(__name__)
 
-STATE_NAME = "_shore_state.json"
+CURSOR_NAME = "_shore_cursors.jsonl"
 LOCK_NAME = ".shore.lock"
 
 
 @dataclass(kw_only=True)
 class StageCursor:
-    member: int = 0
-    partial_bytes: int = 0
-    written: int = 0
+    tar_name: str
+    stage: str
+    member: int
+    written: int
 
 
-@dataclass(kw_only=True)
-class PipelineState:
-    root: Path
-    stage_cursors: dict[str, dict[str, StageCursor]] = field(default_factory=dict)
-    asr_tars: list[str] = field(default_factory=list)
-    asr_last: tuple[str, str] | None = None
-
-    def cursor(self, tar_name: str, stage: str) -> StageCursor | None:
-        return self.stage_cursors.get(tar_name, {}).get(stage)
-
-    def set_cursor(self, tar_name: str, stage: str, cursor: StageCursor) -> None:
-        self.stage_cursors.setdefault(tar_name, {})[stage] = cursor
-        self.save()
-
-    def clear_cursor(self, tar_name: str, stage: str) -> None:
-        entries = self.stage_cursors.get(tar_name)
-        if entries is None:
-            return
-        entries.pop(stage, None)
-        if not entries:
-            del self.stage_cursors[tar_name]
-        self.save()
-
-    def save(self) -> None:
-        payload = {
-            "version": 1,
-            "stage_cursors": {
-                tar: {
-                    stage: {
-                        "member": cursor.member,
-                        "partial_bytes": cursor.partial_bytes,
-                        "written": cursor.written,
-                    }
-                    for stage, cursor in entries.items()
-                }
-                for tar, entries in self.stage_cursors.items()
-            },
-            "asr_tars": self.asr_tars,
-            "asr_last": list(self.asr_last) if self.asr_last else None,
-        }
-        path = self.root / STATE_NAME
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-        )
-        os.replace(tmp, path)
-
-
-def load_state(root: Path) -> PipelineState:
-    path = root / STATE_NAME
+def iter_records(path: Path) -> Iterator[dict[str, object]]:
+    """Stream valid jsonl lines; truncate a torn tail so appends stay well-formed."""
     if not path.exists():
-        return PipelineState(root=root)
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        cursors = {
-            tar: {
-                stage: StageCursor(**entry) for stage, entry in entries.items()
-            }
-            for tar, entries in payload["stage_cursors"].items()
-        }
-        last = payload.get("asr_last")
-        return PipelineState(
-            root=root,
-            stage_cursors=cursors,
-            asr_tars=list(payload.get("asr_tars", [])),
-            asr_last=(last[0], last[1]) if last else None,
+        return
+    with path.open("r+b") as handle:
+        while True:
+            start = handle.tell()
+            line = handle.readline()
+            if not line:
+                return
+            if not line.endswith(b"\n"):
+                logger.warning("Truncating torn tail in %s", path.name)
+                handle.truncate(start)
+                return
+            try:
+                record = json.loads(line)
+            except ValueError:
+                logger.warning("Skipping broken line in %s", path.name)
+                continue
+            yield cast(dict[str, object], record)
+
+
+def append_record(handle: TextIO, record: Mapping[str, object]) -> None:
+    """Write one durable line; a pause must never leave progress only in memory."""
+    handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    handle.flush()
+
+
+def load_cursors(path: Path) -> dict[tuple[str, str], StageCursor]:
+    """Replay the append-only log; a done event clears the cursor."""
+    current: dict[tuple[str, str], StageCursor] = {}
+    for record in iter_records(path):
+        tar_name = cast(str, record["tar_name"])
+        stage = cast(str, record["stage"])
+        key = (tar_name, stage)
+        if record.get("done"):
+            current.pop(key, None)
+            continue
+        current[key] = StageCursor(
+            tar_name=tar_name,
+            stage=stage,
+            member=cast(int, record["member"]),
+            written=cast(int, record["written"]),
         )
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        logger.warning("Cannot read pipeline state %s: %s", path, exc)
-        return PipelineState(root=root)
+    return current
 
 
 @contextmanager

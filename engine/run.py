@@ -18,7 +18,12 @@ from data_process.data_reader import (
     iter_tars,
     transform_tar,
 )
-from data_process.state import load_state, pipeline_lock
+from data_process.state import (
+    CURSOR_NAME,
+    iter_records,
+    load_cursors,
+    pipeline_lock,
+)
 from data_process.stages import build_slicer, build_uvr
 from engine.backends import (
     Config,
@@ -34,7 +39,6 @@ Task = Literal["uvr", "slicer", "asr"]
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "run.yaml"
 ENV_PATTERN = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)(?::-([^}]*))?\}")
 TASKS = frozenset(get_args(Task))
-ASR_CURSOR_INTERVAL = 50
 
 
 def expand_env(value: object) -> object:
@@ -83,25 +87,28 @@ def engine_revision(path: Path) -> str | None:
 
 
 def show_status(root: Path, output: Path) -> None:
-    state = load_state(root)
-    if state.stage_cursors:
-        for tar_name, entries in state.stage_cursors.items():
-            for stage, cursor in entries.items():
-                logger.info(
-                    "Cursor %s %s: member=%d written=%d",
-                    tar_name,
-                    stage,
-                    cursor.member,
-                    cursor.written,
-                )
+    cursors = load_cursors(root / CURSOR_NAME)
+    if cursors:
+        for cursor in cursors.values():
+            logger.info(
+                "Cursor %s %s: member=%d written=%d",
+                cursor.tar_name,
+                cursor.stage,
+                cursor.member,
+                cursor.written,
+            )
     else:
         logger.info("No stage cursors in progress")
-    logger.info("ASR tars completed: %d", len(state.asr_tars))
-    logger.info("ASR last annotation: %s", state.asr_last)
     lines = 0
-    if output.exists():
-        with output.open(encoding="utf-8") as handle:
-            lines = sum(1 for line in handle if line.strip())
+    tars: set[str] = set()
+    last: tuple[str, str] | None = None
+    for record in iter_records(output):
+        tar_name = cast(str, record["tar_name"])
+        tars.add(tar_name)
+        last = (tar_name, cast(str, record["audio_id"]))
+        lines += 1
+    logger.info("ASR tars annotated: %d", len(tars))
+    logger.info("Last annotation: %s", last)
     logger.info("Annotations: %d", lines)
 
 
@@ -182,11 +189,12 @@ def run_pipeline(
         services_config[service_name] = config
 
     with pipeline_lock(root):
-        state = load_state(root)
+        # A hard kill can leave a transient tar target behind; no staging data is kept.
+        for stale in root.rglob(".*.rewrite"):
+            stale.unlink(missing_ok=True)
         output.parent.mkdir(parents=True, exist_ok=True)
         completed = load_completed(output)
-        known_tars = {tar_name for tar_name, _ in completed}
-        state.asr_tars = [tar for tar in state.asr_tars if tar in known_tars]
+        cursor_path = root / CURSOR_NAME
         services: list[Service] | None = None
         annotated = 0
         try:
@@ -212,8 +220,8 @@ def run_pipeline(
                             operator,
                             extensions,
                             name,
+                            cursor_path=cursor_path,
                             workers=workers,
-                            state=state,
                         )
                         logger.info(
                             "Stage %s rewrote %s with %d audio members",
@@ -232,29 +240,16 @@ def run_pipeline(
                 transcriber = HttpTranscriber(
                     service_by_name[service_name], model_config
                 )
-                if state.asr_last:
-                    logger.info(
-                        "ASR cursor at %s/%s",
-                        state.asr_last[0],
-                        state.asr_last[1],
-                    )
 
                 with output.open("a", encoding="utf-8") as handle:
                     for tar_path in tars:
                         if limit and annotated >= limit:
                             break
-                        if tar_path.name in state.asr_tars:
-                            logger.info(
-                                "Stage %s already annotated %s", name, tar_path.name
-                            )
-                            continue
-                        tar_complete = True
                         for record in iter_audio(tar_path, extensions):
                             key = (tar_path.name, record.audio_id)
                             if key in completed:
                                 continue
                             if limit and annotated >= limit:
-                                tar_complete = False
                                 break
                             text = transcriber.transcribe(
                                 record.audio_id, record.data
@@ -269,16 +264,9 @@ def run_pipeline(
                             )
                             completed.add(key)
                             annotated += 1
-                            state.asr_last = key
-                            if annotated % ASR_CURSOR_INTERVAL == 0:
-                                state.save()
-                        if tar_complete:
-                            state.asr_tars.append(tar_path.name)
-                        state.save()
                         logger.info("Stage %s annotated %s", name, tar_path.name)
         finally:
             stop_services(services or [])
-            state.save()
 
 
 def main() -> None:

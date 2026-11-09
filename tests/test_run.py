@@ -12,9 +12,15 @@ from unittest.mock import patch
 
 import httpx
 
-from data_process.annotation import load_completed
+from data_process.annotation import Annotation, append_annotation, load_completed
 from data_process.data_reader import AudioRecord, Operator
-from data_process.state import load_state, pipeline_lock
+from data_process.state import (
+    CURSOR_NAME,
+    append_record,
+    iter_records,
+    load_cursors,
+    pipeline_lock,
+)
 from engine.backends import (
     Config,
     Request,
@@ -29,6 +35,7 @@ from engine.run import (
     expand_env,
     load_config,
     run_pipeline,
+    show_status,
 )
 
 ASR_MODEL: Config = {
@@ -262,6 +269,15 @@ class PipelineTests(unittest.TestCase):
             )
             transcribed = calls.count("/v1/audio/transcriptions")
             self.assertEqual(transcribed, 2)
+            self.assertFalse((root / "_shore_state.json").exists())
+            self.assertEqual(list(root.glob("*.partial")), [])
+            self.assertEqual(list(root.glob(".*.rewrite")), [])
+            events = list(iter_records(root / CURSOR_NAME))
+            self.assertEqual(
+                {(e["stage"], e["tar_name"]) for e in events if e.get("done")},
+                {("stage1", "en_000.tar"), ("stage2", "en_000.tar")},
+            )
+            self.assertEqual(load_cursors(root / CURSOR_NAME), {})
 
             with patch("engine.run.start_services", side_effect=fake_start), patch(
                 "engine.run.build_operator", side_effect=fake_build_operator
@@ -400,7 +416,7 @@ class PipelineTests(unittest.TestCase):
                 ],
             )
 
-    def test_stage_workers_and_state_are_forwarded(self) -> None:
+    def test_stage_workers_and_cursor_log_are_forwarded(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             make_audio_tar(root / "en_000.tar", ("a.opus",))
@@ -411,13 +427,16 @@ class PipelineTests(unittest.TestCase):
                 run_pipeline(cfg, "stage1", 0, False)
             kwargs = transform.call_args.kwargs
             self.assertEqual(kwargs["workers"], 3)
-            self.assertIsNotNone(kwargs["state"])
+            self.assertEqual(kwargs["cursor_path"], root / CURSOR_NAME)
+            self.assertNotIn("state", kwargs)
 
-    def test_asr_cursor_records_completed_tars(self) -> None:
+    def test_asr_progress_is_streamed_to_jsonl(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             make_audio_tar(root / "en_000.tar", ("a.opus", "b.opus"))
             cfg = pipeline_config(root)
+            output = root / "annotations.jsonl"
+            transcribed: list[str] = []
 
             def handler(request: httpx.Request) -> httpx.Response:
                 return httpx.Response(200, json={"text": "hello"})
@@ -426,12 +445,80 @@ class PipelineTests(unittest.TestCase):
                 client = httpx.Client(transport=httpx.MockTransport(handler))
                 return [Service("omni", SERVICE, client=client)]
 
-            with patch("engine.run.start_services", side_effect=fake_start):
+            class PausedTranscriber:
+                def __init__(self, service: Service, model: Config) -> None:
+                    pass
+
+                def transcribe(self, audio_id: str, data: bytes) -> str:
+                    transcribed.append(audio_id)
+                    if len(transcribed) > 1:
+                        raise RuntimeError("paused")
+                    return "hello"
+
+            class HealthyTranscriber:
+                def __init__(self, service: Service, model: Config) -> None:
+                    pass
+
+                def transcribe(self, audio_id: str, data: bytes) -> str:
+                    transcribed.append(audio_id)
+                    return "hello"
+
+            with patch("engine.run.start_services", side_effect=fake_start), patch(
+                "engine.run.HttpTranscriber", PausedTranscriber
+            ):
+                with self.assertRaises(RuntimeError):
+                    run_pipeline(cfg, "stage3", 0, False)
+
+            lines = output.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 1)
+            self.assertEqual(json.loads(lines[0])["audio_id"], "a.opus")
+            self.assertFalse((root / "_shore_state.json").exists())
+            self.assertFalse(Path(str(output) + ".bad").exists())
+            self.assertEqual(list(root.glob("*.partial")), [])
+
+            with patch("engine.run.start_services", side_effect=fake_start), patch(
+                "engine.run.HttpTranscriber", HealthyTranscriber
+            ):
                 run_pipeline(cfg, "stage3", 0, False)
-            state = load_state(root)
-            self.assertEqual(state.asr_tars, ["en_000.tar"])
-            self.assertEqual(state.asr_last, ("en_000.tar", "b.opus"))
-            self.assertEqual(len(load_completed(root / "annotations.jsonl")), 2)
+
+            self.assertEqual(len(load_completed(output)), 2)
+            self.assertEqual(transcribed.count("a.opus"), 1)
+            self.assertEqual(transcribed.count("b.opus"), 2)
+
+    def test_status_streams_cursors_and_annotations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / "annotations.jsonl"
+            with (root / CURSOR_NAME).open("a", encoding="utf-8") as handle:
+                append_record(
+                    handle,
+                    {
+                        "tar_name": "en.tar",
+                        "stage": "stage1",
+                        "member": 2,
+                        "written": 2,
+                    },
+                )
+            with output.open("a", encoding="utf-8") as handle:
+                append_annotation(
+                    handle,
+                    Annotation(tar_name="en.tar", audio_id="a.opus", asr_text="hi"),
+                )
+            with self.assertLogs("engine.run", level="INFO") as logs:
+                show_status(root, output)
+            self.assertTrue(any("member=2 written=2" in line for line in logs.output))
+            self.assertTrue(any("Annotations: 1" in line for line in logs.output))
+            self.assertTrue(
+                any("('en.tar', 'a.opus')" in line for line in logs.output)
+            )
+
+    def test_hard_kill_leftover_is_removed_on_start(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stale = root / ".en_000.tar.rewrite"
+            stale.write_bytes(b"partial tar bytes")
+            run_pipeline(pipeline_config(root), "stage1", 0, False)
+            self.assertFalse(stale.exists())
 
     def test_second_pipeline_instance_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
