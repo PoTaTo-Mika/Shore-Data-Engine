@@ -92,9 +92,7 @@ class TarReaderTests(unittest.TestCase):
             self.assertEqual(content["album/a_001.opus"], b"audio\x01")
             self.assertEqual(content["album/a.txt"], b"text")
             self.assertEqual(completed_stages(tar_path), {"stage2"})
-            self.assertEqual(
-                json.loads(content["_shore.json"]), {"stages": ["stage2"]}
-            )
+            self.assertEqual(json.loads(content["_shore.json"]), {"stages": ["stage2"]})
             self.assertEqual(staging_files(root), [])
             records = list(iter_records(root / CURSOR_NAME))
             self.assertEqual(
@@ -196,7 +194,7 @@ class ParallelTarTests(unittest.TestCase):
                 for i in range(8)
                 for index in range(2)
             ]
-            self.assertEqual(ordered, expected + ["album/notes.txt", "_shore.json"])
+            self.assertEqual(ordered, [*expected, "album/notes.txt", "_shore.json"])
             self.assertEqual(completed_stages(tar_path), {"stage2"})
             self.assertEqual(staging_files(root), [])
 

@@ -1,16 +1,18 @@
-"""Config-driven serial pipeline that reads and writes audio inside tars."""
+"""Config-driven serial pipeline; each stage launches its backend and sends requests."""
 
 import argparse
 import logging
 import os
 import re
 import subprocess
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Literal, cast, get_args
 
 import yaml
 
 from data_process.annotation import Annotation, append_annotation, load_completed
+from data_process.asr import dispatch as asr_dispatch
 from data_process.data_reader import (
     Operator,
     completed_stages,
@@ -18,27 +20,31 @@ from data_process.data_reader import (
     iter_tars,
     transform_tar,
 )
-from data_process.state import (
-    CURSOR_NAME,
-    iter_records,
-    load_cursors,
-    pipeline_lock,
-)
-from data_process.stages import build_slicer, build_uvr
-from engine.backends import (
-    Config,
-    HttpTranscriber,
-    Service,
-    start_services,
-    stop_services,
-)
+from data_process.protocol import OperatorBackend
+from data_process.state import CURSOR_NAME, iter_records, load_cursors, pipeline_lock
+from data_process.uvr.dispatch import BACKEND as UVR_BACKEND
+from data_process.vad.dispatch import BACKEND as VAD_BACKEND
+from engine.backends import Config, Service, launch
 
 logger = logging.getLogger(__name__)
 
 Task = Literal["uvr", "slicer", "asr"]
+
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "run.yaml"
+DEFAULT_STAGE_WORKERS = 4
 ENV_PATTERN = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)(?::-([^}]*))?\}")
-TASKS = frozenset(get_args(Task))
+REQUIRED_KEYS = (
+    "data_root",
+    "output_name",
+    "audio_extensions",
+    "services",
+    "models",
+    "stages",
+)
+OPERATOR_BACKENDS: dict[Task, OperatorBackend] = {
+    "uvr": UVR_BACKEND,
+    "slicer": VAD_BACKEND,
+}
 
 
 def expand_env(value: object) -> object:
@@ -51,22 +57,32 @@ def expand_env(value: object) -> object:
     return value
 
 
+def model_task(entry: Config) -> Task:
+    """ASR entries name a served `model`; operator entries name an `operator`."""
+    if "model" in entry:
+        return "asr"
+    for task, backend in OPERATOR_BACKENDS.items():
+        if entry.get("operator") in backend.operators:
+            return task
+    raise ValueError(f"Unknown operator: {entry.get('operator')}")
+
+
 def load_config(path: Path) -> Config:
     with path.open(encoding="utf-8") as handle:
         cfg = cast(Config, expand_env(yaml.safe_load(handle)))
-    for key in (
-        "data_root",
-        "output_name",
-        "audio_extensions",
-        "services",
-        "models",
-        "stages",
-    ):
+    for key in REQUIRED_KEYS:
         if key not in cfg:
             raise ValueError(f"Missing config key: {key}")
+    models = cast(dict[str, Config], cfg["models"])
+    services = cast(dict[str, Config], cfg["services"])
     for stage in cast(list[Config], cfg["stages"]):
-        if cast(str, stage["task"]) not in TASKS:
-            raise ValueError(f"Unknown stage task: {stage['task']}")
+        model = cast(str, stage["model"])
+        if model not in models or model_task(models[model]) != stage["task"]:
+            raise ValueError(
+                f"Stage {stage['name']} ({stage['task']}) cannot use model {model}"
+            )
+        if stage["service"] not in services:
+            raise ValueError(f"Unknown service: {stage['service']}")
     return cfg
 
 
@@ -88,16 +104,15 @@ def engine_revision(path: Path) -> str | None:
 
 def show_status(root: Path, output: Path) -> None:
     cursors = load_cursors(root / CURSOR_NAME)
-    if cursors:
-        for cursor in cursors.values():
-            logger.info(
-                "Cursor %s %s: member=%d written=%d",
-                cursor.tar_name,
-                cursor.stage,
-                cursor.member,
-                cursor.written,
-            )
-    else:
+    for cursor in cursors.values():
+        logger.info(
+            "Cursor %s %s: member=%d written=%d",
+            cursor.tar_name,
+            cursor.stage,
+            cursor.member,
+            cursor.written,
+        )
+    if not cursors:
         logger.info("No stage cursors in progress")
     lines = 0
     tars: set[str] = set()
@@ -112,13 +127,16 @@ def show_status(root: Path, output: Path) -> None:
     logger.info("Annotations: %d", lines)
 
 
-def build_operator(task: Task, model: Config) -> Operator:
-    params = cast(dict[str, object], model.get("params", {}))
-    if task == "uvr":
-        return build_uvr(params)
-    if task == "slicer":
-        return build_slicer(params)
-    raise ValueError(f"Task has no local operator: {task}")
+def service_config(task: Task, service: Config, model: Config) -> Config:
+    """Service settings with the backend command for the selected model."""
+    config = dict(service)
+    if task == "asr":
+        if "command" in model:
+            config["command"] = model["command"]
+    else:
+        base_url = cast(str, config["base_url"])
+        config["command"] = OPERATOR_BACKENDS[task].command(model, base_url)
+    return config
 
 
 def run_pipeline(
@@ -126,8 +144,9 @@ def run_pipeline(
     only: str | None,
     limit: int,
     dry_run: bool,
-    model: str | None = None,
+    overrides: list[str] | None = None,
 ) -> None:
+    """Run stages in order; `overrides` swaps models into stages of the same task."""
     engine_path = cfg.get("engine_path")
     if engine_path is not None:
         path = Path(cast(str, engine_path))
@@ -139,10 +158,10 @@ def run_pipeline(
 
     root = Path(cast(str, cfg["data_root"]))
     extensions = set(cast(list[str], cfg["audio_extensions"]))
-    all_services = cast(dict[str, Config], cfg["services"])
+    services = cast(dict[str, Config], cfg["services"])
     models = cast(dict[str, Config], cfg["models"])
     output = root / cast(str, cfg["output_name"])
-    workers = int(cast(str | int, cfg.get("stage_workers", 4)))
+    workers = int(cast(str | int, cfg.get("stage_workers", DEFAULT_STAGE_WORKERS)))
     if workers < 1:
         raise ValueError(f"stage_workers must be >= 1, got {workers}")
     stages = [
@@ -150,43 +169,35 @@ def run_pipeline(
         for stage in cast(list[Config], cfg["stages"])
         if not only or stage["name"] == only
     ]
-    asr_keys = sorted(key for key, entry in models.items() if "model" in entry)
 
-    if model is not None:
-        if model not in asr_keys:
+    for override in overrides or []:
+        if override not in models:
             raise ValueError(
-                f"Unknown ASR model: {model}; available: {', '.join(asr_keys)}"
+                f"Unknown model: {override}; available: {', '.join(sorted(models))}"
             )
-        for stage in stages:
-            if stage["task"] == "asr":
-                stage["model"] = model
+        task = model_task(models[override])
+        matched = [stage for stage in stages if stage["task"] == task]
+        if not matched:
+            raise ValueError(f"No selected {task} stage for model {override}")
+        for stage in matched:
+            stage["model"] = override
 
     if dry_run:
         for stage in stages:
             logger.info(
-                "Stage %s task=%s model=%s",
+                "Stage %s task=%s service=%s model=%s",
                 stage["name"],
                 stage["task"],
+                stage["service"],
                 stage["model"],
             )
-        logger.info("ASR models: %s", ", ".join(asr_keys))
-        logger.info(
-            "Dry run: %d tars, %d stage workers", len(list(iter_tars(root))), workers
-        )
+        for task in get_args(Task):
+            keys = sorted(
+                key for key, entry in models.items() if model_task(entry) == task
+            )
+            logger.info("Models for %s: %s", task, ", ".join(keys))
+        logger.info("Dry run: %d tars, %d stage workers", len(iter_tars(root)), workers)
         return
-
-    services_config: dict[str, Config] = {}
-    for stage in stages:
-        if stage["task"] != "asr":
-            continue
-        service_name = cast(str, stage["service"])
-        entry = models[cast(str, stage["model"])]
-        if "model" not in entry:
-            raise ValueError(f"Not an ASR model: {stage['model']}")
-        config = dict(all_services[service_name])
-        if "command" in entry:
-            config["command"] = entry["command"]
-        services_config[service_name] = config
 
     with pipeline_lock(root):
         # A hard kill can leave a transient tar target behind; no staging data is kept.
@@ -195,15 +206,17 @@ def run_pipeline(
         output.parent.mkdir(parents=True, exist_ok=True)
         completed = load_completed(output)
         cursor_path = root / CURSOR_NAME
-        services: list[Service] | None = None
         annotated = 0
-        try:
-            for stage in stages:
-                name = cast(str, stage["name"])
-                task = cast(Task, stage["task"])
-                model_config = models[cast(str, stage["model"])]
-                tars = list(iter_tars(root))
-                logger.info("Stage %s processing %d tars", name, len(tars))
+        for stage in stages:
+            name = cast(str, stage["name"])
+            task = cast(Task, stage["task"])
+            model = models[cast(str, stage["model"])]
+            config = service_config(task, services[cast(str, stage["service"])], model)
+            tars = iter_tars(root)
+            logger.info("Stage %s processing %d tars", name, len(tars))
+            # The backend starts on first pending work and stops when the stage ends.
+            with ExitStack() as stack:
+                service: Service | None = None
 
                 if task != "asr":
                     operator: Operator | None = None
@@ -214,7 +227,12 @@ def run_pipeline(
                             )
                             continue
                         if operator is None:
-                            operator = build_operator(task, model_config)
+                            service = stack.enter_context(
+                                launch(cast(str, stage["service"]), config)
+                            )
+                            operator = OPERATOR_BACKENDS[task].connect(
+                                service.client, service.base_url, service.retry
+                            )
                         members = transform_tar(
                             tar_path,
                             operator,
@@ -231,16 +249,6 @@ def run_pipeline(
                         )
                     continue
 
-                if services is None:
-                    services = start_services(services_config)
-                service_by_name = {service.name: service for service in services}
-                service_name = cast(str, stage["service"])
-                if service_name not in service_by_name:
-                    raise ValueError(f"Unknown service: {service_name}")
-                transcriber = HttpTranscriber(
-                    service_by_name[service_name], model_config
-                )
-
                 with output.open("a", encoding="utf-8") as handle:
                     for tar_path in tars:
                         if limit and annotated >= limit:
@@ -251,22 +259,27 @@ def run_pipeline(
                                 continue
                             if limit and annotated >= limit:
                                 break
-                            text = transcriber.transcribe(
-                                record.audio_id, record.data
-                            )
+                            if service is None:
+                                service = stack.enter_context(
+                                    launch(cast(str, stage["service"]), config)
+                                )
+                                transcribe = asr_dispatch.connect(
+                                    service.client,
+                                    service.base_url,
+                                    model,
+                                    service.retry,
+                                )
                             append_annotation(
                                 handle,
                                 Annotation(
                                     tar_name=tar_path.name,
                                     audio_id=record.audio_id,
-                                    asr_text=text,
+                                    asr_text=transcribe(record),
                                 ),
                             )
                             completed.add(key)
                             annotated += 1
                         logger.info("Stage %s annotated %s", name, tar_path.name)
-        finally:
-            stop_services(services or [])
 
 
 def main() -> None:
@@ -276,7 +289,9 @@ def main() -> None:
     parser.add_argument("-c", "--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--stage", help="Run a single stage by name")
     parser.add_argument(
-        "--model", help="Override the ASR model for stage3 (key in models)"
+        "--model",
+        action="append",
+        help="Use this models key for the stage of its task; repeatable",
     )
     parser.add_argument(
         "--limit", type=int, default=0, help="Max annotations, 0 means all"
@@ -284,15 +299,17 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--status", action="store_true", help="Show cursors and exit")
     args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
+    )
+    # httpx logs every request at INFO, which floods per-member stage logs.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     cfg = load_config(args.config)
     if args.status:
         root = Path(cast(str, cfg["data_root"]))
         show_status(root, root / cast(str, cfg["output_name"]))
         return
-    run_pipeline(
-        cfg, args.stage, args.limit, args.dry_run, args.model
-    )
+    run_pipeline(cfg, args.stage, args.limit, args.dry_run, args.model)
 
 
 if __name__ == "__main__":

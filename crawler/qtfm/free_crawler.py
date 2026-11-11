@@ -1,13 +1,10 @@
 import requests
-import json
 import time
 import logging
 import hmac
 import hashlib
 import os
 import re
-from urllib.parse import urlparse, parse_qs
-from crawl_tools.get_name import get_name
 
 # 配置logging，使其能在终端显示INFO级别的日志
 logging.basicConfig(
@@ -21,21 +18,34 @@ logging.basicConfig(
 # 蜻蜓FM采用的API接口是一个重定向的动态网页
 # 目前这个脚本只能爬一个album，后续待更新到全自动爬取
 
-PROGRAM_URL = "https://i.qtfm.cn/capi/channel/121170/programs/9a4ff4c800f208f564579039441b5062?curpage=5&pagesize=100&order=asc"
+# 默认专辑，直接填蜻蜓FM网页地址即可（脚本会从中解析出专辑 ID）
+CHANNEL_URL = "https://www.qtfm.cn/channels/259433/"
 
-# 解析URL获取基础信息
-parsed_url = urlparse(PROGRAM_URL)
-base_url = f"{parsed_url.scheme}://{parsed_url.netloc}{parsed_url.path}"
-query_params = parse_qs(parsed_url.query)
+# 从网页地址中解析出album_id
+match = re.search(r'/channels/(\d+)', CHANNEL_URL)
+if not match:
+    logging.error(f"无法从 CHANNEL_URL '{CHANNEL_URL}' 中解析出专辑 ID")
+    exit()
+ALBUM_ID = match.group(1)
 
-# 获取album_id
-ALBUM_ID = re.search(r'channel/(\d+)', PROGRAM_URL).group(1)
+# 节目列表接口为 /capi/channel/{id}/programs/{v}，路径末尾的 v 是频道详情接口
+# 返回的版本号，专辑更新后会变化，写死会失效，所以每次运行时实时获取
+try:
+    response = requests.get(f"https://i.qtfm.cn/capi/v3/channel/{ALBUM_ID}", timeout=15)
+    response.raise_for_status()
+    channel_info = response.json()['data']
+    base_url = f"https://i.qtfm.cn/capi/channel/{ALBUM_ID}/programs/{channel_info['v']}"
+    ALBUM_TITLE = channel_info.get('title', ALBUM_ID)
+    logging.info(f"专辑: {ALBUM_TITLE} ({ALBUM_ID})，共 {channel_info.get('program_count', '未知')} 个节目")
+except Exception as e:
+    logging.error(f"获取专辑信息失败: {e}")
+    exit()
 
 # 额外的盐 不确定会不会每天改变
 SECRECT_KEY = "7l8CZ)SgZgM_bkrw"
 
 # 下载文件夹
-DOWNLOAD_FOLDER = './data/' + str(get_name(ALBUM_ID))
+DOWNLOAD_FOLDER = './data/' + str(ALBUM_TITLE)
 if not os.path.exists(DOWNLOAD_FOLDER):
     os.makedirs(DOWNLOAD_FOLDER)
 

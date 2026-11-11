@@ -31,8 +31,8 @@ class AudioRecord:
 Operator = Callable[[AudioRecord], Iterable[AudioRecord]]
 
 
-def iter_tars(root: Path) -> Iterator[Path]:
-    return iter(sorted(p for p in root.rglob("*.tar") if p.is_file()))
+def iter_tars(root: Path) -> list[Path]:
+    return sorted(p for p in root.rglob("*.tar") if p.is_file())
 
 
 def completed_stages(tar_path: Path) -> set[str]:
@@ -50,7 +50,10 @@ def completed_stages(tar_path: Path) -> set[str]:
 def iter_audio(tar_path: Path, extensions: set[str]) -> Iterator[AudioRecord]:
     with tarfile.open(tar_path, "r") as tar:
         for member in tar:
-            if not member.isfile() or Path(member.name).suffix.lower() not in extensions:
+            if (
+                not member.isfile()
+                or Path(member.name).suffix.lower() not in extensions
+            ):
                 continue
             handle = tar.extractfile(member)
             assert handle is not None
@@ -67,12 +70,9 @@ def transform_tar(
     cursor_path: Path,
     workers: int = 1,
 ) -> int:
-    """Stream members through operator and rewrite the tar locally in place.
+    """Stream members through `operator` and atomically replace the tar.
 
-    There is no partial tar: the destination is written to a transient file and
-    replaces the source atomically, and it is removed on any interruption.
-    Member cursors are appended to jsonl as soon as they commit.
-    Returns the number of audio members written.
+    Per-member cursors go to `cursor_path`. Returns the number of audio members written.
     """
     assert workers >= 1
     stages = completed_stages(tar_path)
@@ -122,10 +122,10 @@ def transform_tar(
                     results = iter(
                         pool.map(lambda record: list(operator(record)), audio)
                     )
-                    for index, (member, record, data) in enumerate(jobs):
+                    for index, (member, record, raw) in enumerate(jobs):
                         if record is None:
                             dst.addfile(
-                                member, BytesIO(data) if data is not None else None
+                                member, BytesIO(raw) if raw is not None else None
                             )
                         else:
                             for output in next(results):

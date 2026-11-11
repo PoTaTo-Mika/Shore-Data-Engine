@@ -31,6 +31,7 @@ local = [
     "silero-vad",
     "ten-vad",
     "demucs",
+    "onnxruntime>=1.17",
 ]
 crawler = [
     "requests>=2.31.0",
@@ -54,6 +55,7 @@ all = [
     "silero-vad",
     "ten-vad",
     "demucs",
+    "onnxruntime>=1.17",
     "requests>=2.31.0",
     "beautifulsoup4>=4.12.0",
     "aiohttp>=3.9",

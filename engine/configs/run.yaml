@@ -1,16 +1,27 @@
-# Single source of truth for the tar-based annotation pipeline.
 data_root: data
 output_name: annotations.jsonl
 audio_extensions: [.opus, .wav, .mp3, .flac, .m4a, .ogg, .aac]
 engine_path: engine/sglang-omni
 
-# Audio members processed in parallel per tar by stage1/stage2.
-# UVR serializes GPU inference with a lock while CPU-side ffmpeg runs concurrently.
+# Concurrent requests per tar sent to the uvr / slicer backends.
 stage_workers: ${SHORE_STAGE_WORKERS:-4}
 
-# Shared service settings; the selected ASR model supplies the command.
-# Remove that command to attach to an already running server.
+# Every stage runs against a backend service, started for the stage and stopped after it.
+# uvr / slicer backends are the stage dispatch servers; the ASR model supplies its command.
+# Drop an ASR model's command to attach to an already running server.
 services:
+  uvr:
+    base_url: ${UVR_BASE_URL:-http://127.0.0.1:8001}
+    health_path: /health
+    startup_timeout_s: 600
+    timeout_s: 600
+    retry: {max_attempts: 3, backoff_s: 1.0, status_codes: [502, 503, 504]}
+  vad:
+    base_url: ${VAD_BASE_URL:-http://127.0.0.1:8002}
+    health_path: /health
+    startup_timeout_s: 300
+    timeout_s: 300
+    retry: {max_attempts: 3, backoff_s: 1.0, status_codes: [502, 503, 504]}
   omni:
     base_url: ${OMNI_BASE_URL:-http://127.0.0.1:8000}
     api_key_env: OMNI_API_KEY
@@ -22,13 +33,29 @@ services:
       backoff_s: 1.0
       status_codes: [429, 500, 502, 503, 504]
 
+# Pick a model per stage with stages[].model or `--model <key>` (repeatable).
 models:
-  # Local operators for stage1 / stage2.
-  demucs: {params: {model: htdemucs}}
-  rms_vad: {params: {threshold: -30.0, min_length: 10000}}
+  # uvr: served by data_process.uvr.dispatch at /v1/audio/separations.
+  demucs: {operator: demucs, params: {model: htdemucs}}
+  # MDX-Net ONNX weights are downloaded from repo_id when model_path is missing.
+  # n_fft / dim_f / dim_t / compensate are per-checkpoint; these match Kim_Vocal_2.
+  mdx_net:
+    operator: mdx_net
+    params:
+      model_path: checkpoints/Kim_Vocal_2.onnx
+      repo_id: seanghay/uvr_models
+      stem: vocals
+      n_fft: 7680
+      dim_f: 3072
+      dim_t: 256
+      compensate: 1.009
 
-  # stage3 options: pick one with --model <key> or stages[2].model.
-  # Every entry is plain ASR: multipart /v1/audio/transcriptions, response_format=json.
+  # slicer: served by data_process.vad.dispatch at /v1/audio/segments.
+  rms_vad: {operator: rms_vad, params: {threshold: -30.0, min_length: 10000}}
+  silero_vad: {operator: silero_vad, params: {threshold: 0.6, min_silence_ms: 500, target_s: 15.0, max_s: 20.0}}
+  ten_vad: {operator: ten_vad, params: {threshold: 0.5, min_speech_ms: 300, min_silence_ms: 200}}
+
+  # asr: plain multipart /v1/audio/transcriptions with response_format=json.
   # Checkpoints present in checkpoints/ are referenced by local path; the rest
   # use their HuggingFace repo id and are fetched by sglang-omni on first use.
   qwen3_asr:
@@ -67,6 +94,6 @@ models:
 
 # stage1 UVR, stage2 Slicer, stage3 ASR; each stage covers all tars before the next.
 stages:
-  - {name: stage1, task: uvr, model: demucs}
-  - {name: stage2, task: slicer, model: rms_vad}
+  - {name: stage1, task: uvr, service: uvr, model: demucs}
+  - {name: stage2, task: slicer, service: vad, model: rms_vad}
   - {name: stage3, task: asr, service: omni, model: qwen3_asr}
