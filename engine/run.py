@@ -11,8 +11,6 @@ from typing import Literal, cast, get_args
 
 import yaml
 
-from data_process.annotation import Annotation, append_annotation, load_completed
-from data_process.asr import dispatch as asr_dispatch
 from data_process.data_reader import (
     Operator,
     completed_stages,
@@ -20,10 +18,17 @@ from data_process.data_reader import (
     iter_tars,
     transform_tar,
 )
+from data_process.dispatch import BACKENDS, asr_transcriber
 from data_process.protocol import OperatorBackend
-from data_process.state import CURSOR_NAME, iter_records, load_cursors, pipeline_lock
-from data_process.uvr.dispatch import BACKEND as UVR_BACKEND
-from data_process.vad.dispatch import BACKEND as VAD_BACKEND
+from data_process.state import (
+    CURSOR_NAME,
+    Annotation,
+    append_annotation,
+    iter_records,
+    load_completed,
+    load_cursors,
+    pipeline_lock,
+)
 from engine.backends import Config, Service, launch
 
 logger = logging.getLogger(__name__)
@@ -41,10 +46,7 @@ REQUIRED_KEYS = (
     "models",
     "stages",
 )
-OPERATOR_BACKENDS: dict[Task, OperatorBackend] = {
-    "uvr": UVR_BACKEND,
-    "slicer": VAD_BACKEND,
-}
+OPERATOR_BACKENDS = cast(dict[Task, OperatorBackend], BACKENDS)
 
 
 def expand_env(value: object) -> object:
@@ -263,7 +265,7 @@ def run_pipeline(
                                 service = stack.enter_context(
                                     launch(cast(str, stage["service"]), config)
                                 )
-                                transcribe = asr_dispatch.connect(
+                                transcribe = asr_transcriber(
                                     service.client,
                                     service.base_url,
                                     model,

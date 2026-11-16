@@ -1,11 +1,11 @@
-"""Append-only jsonl cursors and the single-run lock for the tar pipeline."""
+"""Append-only jsonl records, stage cursors, and the single-run lock."""
 
 import fcntl
 import json
 import logging
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TextIO, cast
 
@@ -49,6 +49,25 @@ def append_record(handle: TextIO, record: Mapping[str, object]) -> None:
     """Write one durable line; a pause must never leave progress only in memory."""
     handle.write(json.dumps(record, ensure_ascii=False) + "\n")
     handle.flush()
+
+
+@dataclass(kw_only=True)
+class Annotation:
+    tar_name: str
+    audio_id: str
+    asr_text: str
+
+
+def load_completed(path: Path) -> set[tuple[str, str]]:
+    """Stream (tar name, audio id) pairs already written, for resuming a run."""
+    return {
+        (cast(str, record["tar_name"]), cast(str, record["audio_id"]))
+        for record in iter_records(path)
+    }
+
+
+def append_annotation(handle: TextIO, annotation: Annotation) -> None:
+    append_record(handle, asdict(annotation))
 
 
 def load_cursors(path: Path) -> dict[tuple[str, str], StageCursor]:

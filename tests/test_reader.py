@@ -8,7 +8,6 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from data_process.annotation import Annotation, append_annotation, load_completed
 from data_process.data_reader import (
     AudioRecord,
     completed_stages,
@@ -16,7 +15,14 @@ from data_process.data_reader import (
     iter_tars,
     transform_tar,
 )
-from data_process.state import CURSOR_NAME, iter_records, load_cursors
+from data_process.state import (
+    CURSOR_NAME,
+    Annotation,
+    append_annotation,
+    iter_records,
+    load_completed,
+    load_cursors,
+)
 
 
 def make_tar(path: Path, members: dict[str, bytes]) -> None:

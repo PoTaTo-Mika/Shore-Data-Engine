@@ -35,7 +35,7 @@ services:
 
 # Pick a model per stage with stages[].model or `--model <key>` (repeatable).
 models:
-  # uvr: served by data_process.uvr.dispatch at /v1/audio/separations.
+  # uvr: served by data_process.dispatch at /v1/audio/separations.
   demucs: {operator: demucs, params: {model: htdemucs}}
   # MDX-Net ONNX weights are downloaded from repo_id when model_path is missing.
   # n_fft / dim_f / dim_t / compensate are per-checkpoint; these match Kim_Vocal_2.
@@ -50,7 +50,7 @@ models:
       dim_t: 256
       compensate: 1.009
 
-  # slicer: served by data_process.vad.dispatch at /v1/audio/segments.
+  # slicer: served by data_process.dispatch at /v1/audio/segments.
   rms_vad: {operator: rms_vad, params: {threshold: -30.0, min_length: 10000}}
   silero_vad: {operator: silero_vad, params: {threshold: 0.6, min_silence_ms: 500, target_s: 15.0, max_s: 20.0}}
   ten_vad: {operator: ten_vad, params: {threshold: 0.5, min_speech_ms: 300, min_silence_ms: 200}}

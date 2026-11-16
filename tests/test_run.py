@@ -19,19 +19,19 @@ import httpx
 import numpy as np
 import soundfile as sf
 
-from data_process.annotation import Annotation, append_annotation, load_completed
-from data_process.asr.dispatch import build_request
 from data_process.data_reader import AudioRecord
+from data_process.dispatch import BACKENDS, asr_request
 from data_process.protocol import post
 from data_process.state import (
     CURSOR_NAME,
+    Annotation,
+    append_annotation,
     append_record,
     iter_records,
+    load_completed,
     load_cursors,
     pipeline_lock,
 )
-from data_process.uvr.dispatch import BACKEND as UVR_BACKEND
-from data_process.vad.dispatch import BACKEND as VAD_BACKEND
 from engine.backends import Config, Service, launch
 from engine.run import (
     OPERATOR_BACKENDS,
@@ -180,7 +180,7 @@ class ConfigTests(unittest.TestCase):
         }
         self.assertEqual(
             set(operators.values()),
-            set(UVR_BACKEND.operators) | set(VAD_BACKEND.operators),
+            set(BACKENDS["uvr"].operators) | set(BACKENDS["slicer"].operators),
         )
         self.assertEqual(model_task(models["mdx_net"]), "uvr")
         self.assertEqual(model_task(models["ten_vad"]), "slicer")
@@ -239,7 +239,7 @@ class ConfigTests(unittest.TestCase):
         model: Config = {"operator": "mdx_net", "params": {"stem": "vocals"}}
         config = service_config("uvr", service("http://127.0.0.1:8001"), model)
         command = cast(list[str], config["command"])
-        self.assertEqual(command[1:3], ["-m", "data_process.uvr.dispatch"])
+        self.assertEqual(command[1:3], ["-m", "data_process.dispatch"])
         self.assertEqual(command[command.index("--operator") + 1], "mdx_net")
         self.assertEqual(
             json.loads(command[command.index("--params") + 1]), {"stem": "vocals"}
@@ -267,7 +267,7 @@ class RequestTests(unittest.TestCase):
         self.client.close()
 
     def test_transcription_payload_uses_bytes(self) -> None:
-        request = build_request(self.client, "http://svc", ASR_MODEL, self.record)
+        request = asr_request(self.client, "http://svc", ASR_MODEL, self.record)
         self.assertEqual(str(request.url), "http://svc/v1/audio/transcriptions")
         body = request.read()
         self.assertIn(b'name="language"\r\n\r\nzh', body)
@@ -277,17 +277,17 @@ class RequestTests(unittest.TestCase):
     def test_unmapped_field_is_rejected(self) -> None:
         model = {**ASR_MODEL, "params": {"language": "zh", "temperature": 0}}
         with self.assertRaises(ValueError):
-            build_request(self.client, "http://svc", model, self.record)
+            asr_request(self.client, "http://svc", model, self.record)
 
     def test_non_asr_endpoint_is_rejected(self) -> None:
         model: Config = {**ASR_MODEL, "endpoint": "/v1/chat/completions"}
         with self.assertRaises(ValueError):
-            build_request(self.client, "http://svc", model, self.record)
+            asr_request(self.client, "http://svc", model, self.record)
 
     def test_non_text_response_format_is_rejected(self) -> None:
         model: Config = {**ASR_MODEL, "params": {"response_format": "verbose_json"}}
         with self.assertRaises(ValueError):
-            build_request(self.client, "http://svc", model, self.record)
+            asr_request(self.client, "http://svc", model, self.record)
 
     def test_retries_service_unavailable(self) -> None:
         calls: list[str] = []
@@ -357,7 +357,7 @@ class BackendTests(unittest.TestCase):
             tar_name="en.tar", audio_id="a/b.wav", data=buffer.getvalue()
         )
         with launch("vad", config) as svc:
-            operator = VAD_BACKEND.connect(svc.client, svc.base_url, svc.retry)
+            operator = BACKENDS["slicer"].connect(svc.client, svc.base_url, svc.retry)
             outputs = operator(record)
             with self.assertRaises(httpx.HTTPStatusError):
                 operator(replace(record, data=b"not audio"))
@@ -408,7 +408,7 @@ class PipelineTests(unittest.TestCase):
                 ],
             )
             uvr_command = cast(list[str], started[0][1]["command"])
-            self.assertIn("data_process.uvr.dispatch", uvr_command)
+            self.assertIn("data_process.dispatch", uvr_command)
             self.assertEqual(
                 started[4][1]["command"],
                 ["sgl-omni", "serve", "--model-path", "Qwen/Qwen3-ASR-1.7B"],
