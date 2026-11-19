@@ -5,12 +5,15 @@ import logging
 import tarfile
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from data_process.state import append_record
+
+if TYPE_CHECKING:
+    import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +25,9 @@ class AudioRecord:
     tar_name: str
     audio_id: str
     data: bytes
+    # Decoded PCM handed between chained operators in one backend; never serialized.
+    pcm: "np.ndarray | None" = field(default=None, compare=False, repr=False)
+    pcm_rate: int = field(default=0, compare=False)
 
     @property
     def extension(self) -> str:

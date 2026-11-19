@@ -3,6 +3,7 @@
 import fcntl
 import json
 import logging
+import os
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
@@ -13,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 CURSOR_NAME = "_shore_cursors.jsonl"
 LOCK_NAME = ".shore.lock"
+TAIL_CHUNK_BYTES = 1 << 16
 
 
 @dataclass(kw_only=True)
@@ -24,18 +26,12 @@ class StageCursor:
 
 
 def iter_records(path: Path) -> Iterator[dict[str, object]]:
-    """Stream valid jsonl lines; truncate a torn tail so appends stay well-formed."""
+    """Stream complete jsonl lines read-only; a torn tail may be a concurrent append."""
     if not path.exists():
         return
-    with path.open("r+b") as handle:
-        while True:
-            start = handle.tell()
-            line = handle.readline()
-            if not line:
-                return
+    with path.open("rb") as handle:
+        for line in handle:
             if not line.endswith(b"\n"):
-                logger.warning("Truncating torn tail in %s", path.name)
-                handle.truncate(start)
                 return
             try:
                 record = json.loads(line)
@@ -43,6 +39,27 @@ def iter_records(path: Path) -> Iterator[dict[str, object]]:
                 logger.warning("Skipping broken line in %s", path.name)
                 continue
             yield cast(dict[str, object], record)
+
+
+def truncate_torn_tail(path: Path) -> None:
+    """Drop a partial last line left by a hard kill; call only under `pipeline_lock`."""
+    if not path.exists():
+        return
+    with path.open("r+b") as handle:
+        end = handle.seek(0, os.SEEK_END)
+        position = end
+        keep = 0
+        while position > 0:
+            step = min(TAIL_CHUNK_BYTES, position)
+            position -= step
+            handle.seek(position)
+            index = handle.read(step).rfind(b"\n")
+            if index >= 0:
+                keep = position + index + 1
+                break
+        if keep < end:
+            logger.warning("Truncating torn tail in %s", path.name)
+            handle.truncate(keep)
 
 
 def append_record(handle: TextIO, record: Mapping[str, object]) -> None:

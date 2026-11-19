@@ -27,3 +27,7 @@ jsonl:
     "asr_text": "This is transcription",
     "any other features": xxxx
 }
+
+工作流程是，把每个阶段设置为一个函数：
+
+uvr(waveform)，然后这里uvr是一个函数函数，本身具备一个模型属性，根据传入的模型不同决定。

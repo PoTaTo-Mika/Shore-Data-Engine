@@ -1,6 +1,5 @@
-"""Stage dispatch: operator backends, the shared server entry point, and ASR client."""
+"""Operator catalog, the preprocess backend descriptor, and the ASR client."""
 
-import argparse
 import mimetypes
 from collections.abc import Callable
 from pathlib import Path
@@ -11,33 +10,22 @@ import httpx
 from data_process.data_reader import AudioRecord
 from data_process.protocol import OperatorBackend, post
 
-DISPATCH_MODULE = "data_process.dispatch"
+BACKEND_MODULE = "data_process.backend"
+OPERATOR_ENDPOINT = "/v1/audio/process"
 
-BACKENDS: dict[str, OperatorBackend] = {
-    "uvr": OperatorBackend(
-        module=DISPATCH_MODULE,
-        endpoint="/v1/audio/separations",
-        operators={
-            "demucs": "data_process.uvr.demucs",
-            "mdx_net": "data_process.uvr.mdx",
-        },
-    ),
-    "slicer": OperatorBackend(
-        module=DISPATCH_MODULE,
-        endpoint="/v1/audio/segments",
-        operators={
-            "rms_vad": "data_process.vad.rms",
-            "silero_vad": "data_process.vad.silero",
-            "ten_vad": "data_process.vad.ten",
-        },
-    ),
+# Operators compose in a chain: vocal isolation then slicing, so one tar rewrite
+# both cleans and segments each member.
+OPERATORS: dict[str, str] = {
+    "demucs": "data_process.uvr.demucs",
+    "mdx_net": "data_process.uvr.mdx",
+    "rms_vad": "data_process.vad.rms",
+    "silero_vad": "data_process.vad.silero",
+    "ten_vad": "data_process.vad.ten",
 }
 
-OPERATOR_TASKS = {
-    operator: task
-    for task, backend in BACKENDS.items()
-    for operator in backend.operators
-}
+PREPROCESS = OperatorBackend(
+    module=BACKEND_MODULE, endpoint=OPERATOR_ENDPOINT, catalog=OPERATORS
+)
 
 ASR_ENDPOINT = "/v1/audio/transcriptions"
 ASR_FIELDS = frozenset({"language", "prompt", "response_format"})
@@ -84,15 +72,3 @@ def asr_transcriber(
         return cast(str, response.json()["text"]).strip()
 
     return transcribe
-
-
-def main() -> None:
-    """Serve the backend that owns the requested operator."""
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--operator", required=True, choices=sorted(OPERATOR_TASKS))
-    args, _ = parser.parse_known_args()
-    BACKENDS[OPERATOR_TASKS[cast(str, args.operator)]].serve()
-
-
-if __name__ == "__main__":
-    main()

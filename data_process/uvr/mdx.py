@@ -9,7 +9,7 @@ import onnxruntime as ort
 import torch
 from huggingface_hub import hf_hub_download
 
-from data_process.codec import SAMPLE_RATE, decode_audio, replace_audio
+from data_process.codec import base_waveform, carry_pcm
 from data_process.data_reader import AudioRecord, Operator
 
 Stem = Literal["vocals", "instrumental"]
@@ -55,7 +55,7 @@ def build_operator(params: dict[str, object]) -> Operator:
     lock = threading.Lock()
 
     def separate(record: AudioRecord) -> list[AudioRecord]:
-        mix = decode_audio(record, SAMPLE_RATE, 2).T
+        mix = base_waveform(record).T
         length = mix.shape[1]
         pad = step - length % step
         padded = np.pad(mix, ((0, 0), (trim, pad + trim)))
@@ -93,6 +93,6 @@ def build_operator(params: dict[str, object]) -> Operator:
         joined = waves[:, :, trim:-trim].permute(1, 0, 2).reshape(2, -1)[:, :length]
         source = joined.numpy() * compensate
         vocals = source if stem == "vocals" else mix - source
-        return [replace_audio(record, vocals.T, SAMPLE_RATE)]
+        return [carry_pcm(record, vocals.T)]
 
     return separate

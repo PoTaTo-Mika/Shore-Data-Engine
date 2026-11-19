@@ -7,6 +7,7 @@ import socket
 import sys
 import tarfile
 import tempfile
+import time
 import unittest
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -19,8 +20,8 @@ import httpx
 import numpy as np
 import soundfile as sf
 
-from data_process.data_reader import AudioRecord
-from data_process.dispatch import BACKENDS, asr_request
+from data_process.data_reader import MANIFEST_NAME, AudioRecord
+from data_process.dispatch import OPERATORS, PREPROCESS, asr_request
 from data_process.protocol import post
 from data_process.state import (
     CURSOR_NAME,
@@ -34,7 +35,6 @@ from data_process.state import (
 )
 from engine.backends import Config, Service, launch
 from engine.run import (
-    OPERATOR_BACKENDS,
     engine_revision,
     expand_env,
     load_config,
@@ -68,12 +68,29 @@ def free_port() -> int:
         return cast(int, sock.getsockname()[1])
 
 
-def make_audio_tar(path: Path, names: tuple[str, ...]) -> None:
+def make_audio_tar(
+    path: Path, names: tuple[str, ...], stages: tuple[str, ...] = ()
+) -> None:
     with tarfile.open(path, "w") as tar:
         for name in names:
             info = tarfile.TarInfo(name)
             info.size = 4
             tar.addfile(info, io.BytesIO(b"RIFF"))
+        if stages:
+            payload = json.dumps({"stages": list(stages)}).encode("utf-8")
+            info = tarfile.TarInfo(MANIFEST_NAME)
+            info.size = len(payload)
+            tar.addfile(info, io.BytesIO(payload))
+
+
+def health_server(port: int) -> str:
+    return (
+        "import http.server as h\n"
+        "class H(h.BaseHTTPRequestHandler):\n"
+        "    def do_GET(self):\n"
+        "        self.send_response(200); self.end_headers()\n"
+        f"h.HTTPServer(('127.0.0.1', {port}), H).serve_forever()\n"
+    )
 
 
 def pipeline_config(root: Path) -> Config:
@@ -83,23 +100,30 @@ def pipeline_config(root: Path) -> Config:
         "audio_extensions": [".opus"],
         "stage_workers": 3,
         "services": {
-            "uvr": service("http://uvr:1"),
-            "vad": service("http://vad:2"),
+            "preprocess": service("http://preprocess:1"),
             "omni": service("http://omni:3"),
         },
         "models": {
-            "demucs": {"operator": "demucs"},
-            "mdx_net": {"operator": "mdx_net"},
-            "rms_vad": {"operator": "rms_vad"},
+            "clean": {"operators": [{"operator": "demucs"}, {"operator": "rms_vad"}]},
+            "alt_clean": {
+                "operators": [
+                    {"operator": "mdx_net", "params": {"stem": "vocals"}},
+                    {"operator": "silero_vad"},
+                ]
+            },
             "asr": {
                 **ASR_MODEL,
                 "command": ["sgl-omni", "serve", "--model-path", "Qwen/Qwen3-ASR-1.7B"],
             },
         },
         "stages": [
-            {"name": "stage1", "task": "uvr", "service": "uvr", "model": "demucs"},
-            {"name": "stage2", "task": "slicer", "service": "vad", "model": "rms_vad"},
-            {"name": "stage3", "task": "asr", "service": "omni", "model": "asr"},
+            {
+                "name": "stage1",
+                "task": "preprocess",
+                "service": "preprocess",
+                "model": "clean",
+            },
+            {"name": "stage2", "task": "asr", "service": "omni", "model": "asr"},
         ],
     }
 
@@ -133,9 +157,10 @@ def echo(events: list[str]) -> Handler:
 
 def fake_launch(
     handler: Handler, started: list[tuple[str, Config]]
-) -> Callable[[str, Config], Iterator[Service]]:
+) -> Callable[[str, Config, Path], Iterator[Service]]:
     @contextmanager
-    def launch_stub(name: str, config: Config) -> Iterator[Service]:
+    def launch_stub(name: str, config: Config, log_path: Path) -> Iterator[Service]:
+        assert log_path.parent.name == "_shore_logs"
         started.append((name, config))
         transport = httpx.MockTransport(lambda request: handler(name, request))
         with httpx.Client(transport=transport) as client:
@@ -166,24 +191,28 @@ class ConfigTests(unittest.TestCase):
     def test_repository_config_binds_every_stage_to_a_service(self) -> None:
         cfg = load_config(REPO_CONFIG)
         stages = cast(list[Config], cfg["stages"])
-        self.assertEqual([s["name"] for s in stages], ["stage1", "stage2", "stage3"])
-        self.assertEqual([s["task"] for s in stages], ["uvr", "slicer", "asr"])
-        self.assertEqual([s["service"] for s in stages], ["uvr", "vad", "omni"])
+        self.assertEqual([s["name"] for s in stages], ["stage1", "stage2"])
+        self.assertEqual([s["task"] for s in stages], ["preprocess", "asr"])
+        self.assertEqual([s["service"] for s in stages], ["preprocess", "omni"])
         self.assertEqual(cfg["output_name"], "annotations.jsonl")
 
-    def test_repository_config_operators_match_dispatch_modules(self) -> None:
+    def test_repository_config_chains_clean_then_slice(self) -> None:
         models = cast(dict[str, Config], load_config(REPO_CONFIG)["models"])
-        operators = {
-            key: entry["operator"]
+        chains = {
+            key: [
+                cast(str, step["operator"])
+                for step in cast(list[Config], entry["operators"])
+            ]
             for key, entry in models.items()
-            if "operator" in entry
+            if "operators" in entry
         }
-        self.assertEqual(
-            set(operators.values()),
-            set(BACKENDS["uvr"].operators) | set(BACKENDS["slicer"].operators),
-        )
-        self.assertEqual(model_task(models["mdx_net"]), "uvr")
-        self.assertEqual(model_task(models["ten_vad"]), "slicer")
+        self.assertEqual(chains["demucs_rms"], ["demucs", "rms_vad"])
+        for key, operators in chains.items():
+            with self.subTest(model=key):
+                self.assertEqual(model_task(models[key]), "preprocess")
+                self.assertTrue(set(operators) <= set(OPERATORS))
+                self.assertIn(operators[0], {"demucs", "mdx_net"})
+                self.assertIn(operators[-1], {"rms_vad", "silero_vad", "ten_vad"})
 
     def test_repository_config_declares_all_asr_models(self) -> None:
         models = cast(dict[str, Config], load_config(REPO_CONFIG)["models"])
@@ -213,7 +242,7 @@ class ConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "run.yaml"
             cfg = pipeline_config(Path(tmp))
-            cast(list[Config], cfg["stages"])[0]["model"] = "rms_vad"
+            cast(list[Config], cfg["stages"])[0]["model"] = "asr"
             path.write_text(json.dumps(cfg), encoding="utf-8")
             with self.assertRaises(ValueError):
                 load_config(path)
@@ -236,13 +265,17 @@ class ConfigTests(unittest.TestCase):
             self.assertIsNone(revision)
 
     def test_operator_service_command_runs_stage_dispatch(self) -> None:
-        model: Config = {"operator": "mdx_net", "params": {"stem": "vocals"}}
-        config = service_config("uvr", service("http://127.0.0.1:8001"), model)
+        model: Config = {
+            "operators": [
+                {"operator": "mdx_net", "params": {"stem": "vocals"}},
+                {"operator": "rms_vad"},
+            ]
+        }
+        config = service_config("preprocess", service("http://127.0.0.1:8001"), model)
         command = cast(list[str], config["command"])
-        self.assertEqual(command[1:3], ["-m", "data_process.dispatch"])
-        self.assertEqual(command[command.index("--operator") + 1], "mdx_net")
+        self.assertEqual(command[1:3], ["-m", "data_process.backend"])
         self.assertEqual(
-            json.loads(command[command.index("--params") + 1]), {"stem": "vocals"}
+            json.loads(command[command.index("--steps") + 1]), model["operators"]
         )
         self.assertEqual(command[command.index("--port") + 1], "8001")
 
@@ -315,49 +348,81 @@ class RequestTests(unittest.TestCase):
 
 
 class BackendTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.log_path = Path(self.tmp.name) / "logs" / "service.log"
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def assert_port_closes(self, port: int) -> None:
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                httpx.get(f"http://127.0.0.1:{port}/health")
+            except httpx.ConnectError:
+                return
+            self.assertLess(time.monotonic(), deadline, "backend outlived the stage")
+            time.sleep(0.1)
+
     def test_launch_waits_for_health_and_stops_process(self) -> None:
         port = free_port()
-        script = (
-            "import http.server as h\n"
-            "class H(h.BaseHTTPRequestHandler):\n"
-            "    def do_GET(self):\n"
-            "        self.send_response(200); self.end_headers()\n"
-            f"h.HTTPServer(('127.0.0.1', {port}), H).serve_forever()\n"
+        config = {
+            **service(f"http://127.0.0.1:{port}"),
+            "command": [sys.executable, "-c", health_server(port)],
+        }
+        with launch("stub", config, self.log_path) as svc:
+            self.assertEqual(svc.client.get(svc.base_url + "/health").status_code, 200)
+        self.assert_port_closes(port)
+
+    def test_launch_stops_backend_children(self) -> None:
+        port = free_port()
+        parent = (
+            "import subprocess, sys\n"
+            f"subprocess.Popen([sys.executable, '-c', {health_server(port)!r}]).wait()\n"
         )
         config = {
             **service(f"http://127.0.0.1:{port}"),
-            "command": [sys.executable, "-c", script],
+            "command": [sys.executable, "-c", parent],
         }
-        with launch("stub", config) as svc:
+        with launch("stub", config, self.log_path) as svc:
             self.assertEqual(svc.client.get(svc.base_url + "/health").status_code, 200)
-        with self.assertRaises(httpx.ConnectError):
-            httpx.get(f"http://127.0.0.1:{port}/health")
+        self.assert_port_closes(port)
 
-    def test_launch_fails_fast_when_process_exits(self) -> None:
+    def test_launch_fails_fast_and_keeps_backend_log(self) -> None:
+        script = "import sys; sys.stderr.write('cuda oom\\n'); raise SystemExit(3)"
         config = {
             **service(f"http://127.0.0.1:{free_port()}"),
-            "command": [sys.executable, "-c", "raise SystemExit(3)"],
+            "command": [sys.executable, "-c", script],
         }
         with (
             self.assertRaisesRegex(RuntimeError, "exited with code 3"),
-            launch("dead", config),
+            launch("dead", config, self.log_path),
         ):
             pass
+        self.assertIn("cuda oom", self.log_path.read_text(encoding="utf-8"))
 
-    def test_operator_backend_roundtrip_over_http(self) -> None:
-        port = free_port()
-        model: Config = {"operator": "rms_vad", "params": {"min_length": 1000}}
-        config = service_config("slicer", service(f"http://127.0.0.1:{port}"), model)
+    def two_tone_wav(self) -> bytes:
         tone = np.sin(2 * np.pi * 440 * np.arange(3 * 44100) / 44100) * 0.5
         buffer = io.BytesIO()
         sf.write(
             buffer, np.concatenate([tone, np.zeros(44100), tone]), 44100, format="WAV"
         )
-        record = AudioRecord(
-            tar_name="en.tar", audio_id="a/b.wav", data=buffer.getvalue()
+        return buffer.getvalue()
+
+    def test_operator_backend_roundtrip_over_http(self) -> None:
+        port = free_port()
+        model: Config = {
+            "operators": [{"operator": "rms_vad", "params": {"min_length": 1000}}]
+        }
+        config = service_config(
+            "preprocess", service(f"http://127.0.0.1:{port}"), model
         )
-        with launch("vad", config) as svc:
-            operator = BACKENDS["slicer"].connect(svc.client, svc.base_url, svc.retry)
+        record = AudioRecord(
+            tar_name="en.tar", audio_id="a/b.wav", data=self.two_tone_wav()
+        )
+        with launch("preprocess", config, self.log_path) as svc:
+            operator = PREPROCESS.connect(svc.client, svc.base_url, svc.retry)
             outputs = operator(record)
             with self.assertRaises(httpx.HTTPStatusError):
                 operator(replace(record, data=b"not audio"))
@@ -367,6 +432,29 @@ class BackendTests(unittest.TestCase):
         self.assertTrue(
             all(r.tar_name == "en.tar" and r.data[:4] == b"OggS" for r in outputs)
         )
+
+    def test_operator_chain_runs_steps_in_order(self) -> None:
+        port = free_port()
+        model: Config = {
+            "operators": [
+                {"operator": "rms_vad", "params": {"min_length": 1000}},
+                {"operator": "rms_vad", "params": {"min_length": 1000}},
+            ]
+        }
+        config = service_config(
+            "preprocess", service(f"http://127.0.0.1:{port}"), model
+        )
+        record = AudioRecord(
+            tar_name="en.tar", audio_id="a/b.wav", data=self.two_tone_wav()
+        )
+        with launch("preprocess", config, self.log_path) as svc:
+            outputs = PREPROCESS.connect(svc.client, svc.base_url, svc.retry)(record)
+        # First slicer splits into two clips; the second slices each clip again.
+        self.assertEqual(
+            [r.audio_id for r in outputs],
+            ["a/b_000_000.opus", "a/b_001_000.opus"],
+        )
+        self.assertTrue(all(r.data[:4] == b"OggS" for r in outputs))
 
 
 class PipelineTests(unittest.TestCase):
@@ -394,23 +482,25 @@ class PipelineTests(unittest.TestCase):
 
             self.assertEqual(
                 [name for name, _ in started],
-                ["uvr", "stop:uvr", "vad", "stop:vad", "omni", "stop:omni"],
+                ["preprocess", "stop:preprocess", "omni", "stop:omni"],
             )
             self.assertEqual(
                 events,
                 [
-                    "uvr:en_000.tar:a.opus",
-                    "uvr:en_001.tar:b.opus",
-                    "vad:en_000.tar:a.opus",
-                    "vad:en_001.tar:b.opus",
+                    "preprocess:en_000.tar:a.opus",
+                    "preprocess:en_001.tar:b.opus",
                     "omni:asr",
                     "omni:asr",
                 ],
             )
-            uvr_command = cast(list[str], started[0][1]["command"])
-            self.assertIn("data_process.dispatch", uvr_command)
+            clean_command = cast(list[str], started[0][1]["command"])
+            self.assertIn("data_process.backend", clean_command)
             self.assertEqual(
-                started[4][1]["command"],
+                json.loads(clean_command[clean_command.index("--steps") + 1]),
+                [{"operator": "demucs"}, {"operator": "rms_vad"}],
+            )
+            self.assertEqual(
+                started[2][1]["command"],
                 ["sgl-omni", "serve", "--model-path", "Qwen/Qwen3-ASR-1.7B"],
             )
 
@@ -435,7 +525,7 @@ class PipelineTests(unittest.TestCase):
             cursor_events = list(iter_records(root / CURSOR_NAME))
             self.assertEqual(
                 {(e["stage"], e["tar_name"]) for e in cursor_events if e.get("done")},
-                {("stage1", "en_000.tar"), ("stage2", "en_000.tar")},
+                {("stage1", "en_000.tar")},
             )
             self.assertEqual(load_cursors(root / CURSOR_NAME), {})
 
@@ -446,10 +536,10 @@ class PipelineTests(unittest.TestCase):
     def test_stage_filter_and_limit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            make_audio_tar(root / "en_000.tar", ("a.opus", "b.opus"))
+            make_audio_tar(root / "en_000.tar", ("a.opus", "b.opus"), ("stage1",))
             events: list[str] = []
             started = self.run_with_backends(
-                pipeline_config(root), echo(events), only="stage3", limit=1
+                pipeline_config(root), echo(events), only="stage2", limit=1
             )
             self.assertEqual([name for name, _ in started], ["omni", "stop:omni"])
             lines = (
@@ -489,12 +579,13 @@ class PipelineTests(unittest.TestCase):
                 bodies.append(request.read())
                 return handle(name, request)
 
-            started = self.run_with_backends(cfg, handler, overrides=["mdx_net", "alt"])
-            uvr_command = cast(list[str], started[0][1]["command"])
-            self.assertEqual(
-                uvr_command[uvr_command.index("--operator") + 1], "mdx_net"
+            started = self.run_with_backends(
+                cfg, handler, overrides=["alt_clean", "alt"]
             )
-            self.assertEqual(started[4][1]["command"], alt["command"])
+            clean_command = cast(list[str], started[0][1]["command"])
+            steps = json.loads(clean_command[clean_command.index("--steps") + 1])
+            self.assertEqual(steps[0]["operator"], "mdx_net")
+            self.assertEqual(started[2][1]["command"], alt["command"])
             self.assertIn(b"openai/whisper-large-v3", bodies[-1])
 
     def test_unknown_model_is_rejected(self) -> None:
@@ -503,7 +594,7 @@ class PipelineTests(unittest.TestCase):
 
     def test_override_without_matching_stage_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, self.assertRaises(ValueError):
-            run_pipeline(pipeline_config(Path(tmp)), "stage3", 0, True, ["mdx_net"])
+            run_pipeline(pipeline_config(Path(tmp)), "stage2", 0, True, ["clean"])
 
     def test_stage_without_pending_work_starts_no_backend(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -525,10 +616,25 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(kwargs["workers"], 3)
             self.assertEqual(kwargs["cursor_path"], root / CURSOR_NAME)
 
+    def test_asr_skips_tars_with_pending_earlier_stages(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            make_audio_tar(root / "en_000.tar", ("a.opus",))
+            make_audio_tar(root / "en_001.tar", ("b.opus",), ("stage1",))
+            events: list[str] = []
+            with self.assertLogs("engine.run", level="WARNING") as logs:
+                self.run_with_backends(
+                    pipeline_config(root), echo(events), only="stage2"
+                )
+            self.assertTrue(any("en_000.tar" in line for line in logs.output))
+            self.assertEqual(
+                load_completed(root / "annotations.jsonl"), {("en_001.tar", "b.opus")}
+            )
+
     def test_asr_progress_is_streamed_to_jsonl(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            make_audio_tar(root / "en_000.tar", ("a.opus", "b.opus"))
+            make_audio_tar(root / "en_000.tar", ("a.opus", "b.opus"), ("stage1",))
             cfg = pipeline_config(root)
             output = root / "annotations.jsonl"
             transcribed: list[str] = []
@@ -540,14 +646,14 @@ class PipelineTests(unittest.TestCase):
                 return httpx.Response(200, json={"text": "hello"})
 
             with self.assertRaises(httpx.HTTPStatusError):
-                self.run_with_backends(cfg, paused, only="stage3")
+                self.run_with_backends(cfg, paused, only="stage2")
             lines = output.read_text(encoding="utf-8").splitlines()
             self.assertEqual(
                 [json.loads(line)["audio_id"] for line in lines], ["a.opus"]
             )
 
             events: list[str] = []
-            self.run_with_backends(cfg, echo(events), only="stage3")
+            self.run_with_backends(cfg, echo(events), only="stage2")
             self.assertEqual(len(load_completed(output)), 2)
             self.assertEqual(events, ["omni:asr"])
 
@@ -576,6 +682,20 @@ class PipelineTests(unittest.TestCase):
             self.assertTrue(any("Annotations: 1" in line for line in logs.output))
             self.assertTrue(any("('en.tar', 'a.opus')" in line for line in logs.output))
 
+    def test_status_leaves_in_flight_append_intact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            output = root / "annotations.jsonl"
+            content = (
+                '{"tar_name": "en.tar", "audio_id": "a.opus", "asr_text": "hi"}\n'
+                '{"tar_name": "en.tar", "audio_id": "b.op'
+            )
+            output.write_text(content, encoding="utf-8")
+            with self.assertLogs("engine.run", level="INFO") as logs:
+                show_status(root, output)
+            self.assertTrue(any("Annotations: 1" in line for line in logs.output))
+            self.assertEqual(output.read_text(encoding="utf-8"), content)
+
     def test_hard_kill_leftover_is_removed_on_start(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -590,5 +710,9 @@ class PipelineTests(unittest.TestCase):
             with pipeline_lock(root), self.assertRaises(RuntimeError):
                 run_pipeline(pipeline_config(root), "stage1", 0, False)
 
-    def test_operator_backends_cover_operator_tasks(self) -> None:
-        self.assertEqual(set(OPERATOR_BACKENDS), {"uvr", "slicer"})
+    def test_catalog_covers_chainable_operators(self) -> None:
+        self.assertEqual(
+            set(PREPROCESS.catalog),
+            {"demucs", "mdx_net", "rms_vad", "silero_vad", "ten_vad"},
+        )
+        self.assertEqual(set(OPERATORS), set(PREPROCESS.catalog))

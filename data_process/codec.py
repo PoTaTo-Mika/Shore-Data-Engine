@@ -52,6 +52,30 @@ def decode_audio(record: AudioRecord, sample_rate: int, channels: int) -> np.nda
     return np.frombuffer(pcm, dtype=np.float32).reshape(-1, channels)
 
 
+def base_waveform(record: AudioRecord) -> np.ndarray:
+    """Stereo float32 PCM at SAMPLE_RATE, reusing a chain's decoded cache when present.
+
+    Chained operators pass PCM through `record.pcm`, so an isolation step feeds the
+    following slicer directly instead of encoding and decoding the whole audio again.
+    """
+    if record.pcm is not None:
+        return record.pcm
+    return decode_audio(record, SAMPLE_RATE, 2)
+
+
+def carry_pcm(record: AudioRecord, waveform: np.ndarray) -> AudioRecord:
+    """Pass decoded audio to the next operator unencoded; see `ensure_encoded`."""
+    return replace(record, data=b"", pcm=waveform, pcm_rate=SAMPLE_RATE)
+
+
+def ensure_encoded(record: AudioRecord) -> AudioRecord:
+    """Encode a record a terminal isolation step left as PCM; pass encoded ones through."""
+    if record.data:
+        return record
+    assert record.pcm is not None
+    return replace_audio(record, record.pcm, record.pcm_rate)
+
+
 def encode_opus(waveform: np.ndarray, sample_rate: int) -> bytes:
     """Encode float PCM shaped (samples,) or (samples, channels) as ogg/opus."""
     channels = 1 if waveform.ndim == 1 else waveform.shape[1]
@@ -84,9 +108,15 @@ def replace_audio(
     if record.extension == ".wav":
         buffer = BytesIO()
         sf.write(buffer, waveform, sample_rate, format="WAV", subtype="PCM_16")
-        return replace(record, data=buffer.getvalue())
+        return replace(record, data=buffer.getvalue(), pcm=None, pcm_rate=0)
     audio_id = str(Path(record.audio_id).with_suffix(".opus"))
-    return replace(record, audio_id=audio_id, data=encode_opus(waveform, sample_rate))
+    return replace(
+        record,
+        audio_id=audio_id,
+        data=encode_opus(waveform, sample_rate),
+        pcm=None,
+        pcm_rate=0,
+    )
 
 
 def slice_record(
@@ -103,6 +133,12 @@ def slice_record(
             segments,
         )
         return [
-            replace(record, audio_id=f"{stem}_{index:03d}.opus", data=data)
+            replace(
+                record,
+                audio_id=f"{stem}_{index:03d}.opus",
+                data=data,
+                pcm=None,
+                pcm_rate=0,
+            )
             for index, data in enumerate(encoded)
         ]

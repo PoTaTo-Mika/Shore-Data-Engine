@@ -22,6 +22,7 @@ from data_process.state import (
     iter_records,
     load_completed,
     load_cursors,
+    truncate_torn_tail,
 )
 
 
@@ -273,16 +274,18 @@ class ResumeTests(unittest.TestCase):
     def test_torn_jsonl_tail_is_truncated_without_extra_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "annotations.jsonl"
-            path.write_text(
+            torn = (
                 '{"tar_name": "a.tar", "audio_id": "a.opus", "asr_text": "hi"}\n'
                 '{"tar_name": "a.tar", "audio_id": "b.opus", "asr_text": "yo"}\n'
-                '{"tar_name": "a.tar", "audio_id": "c.opus", "asr',
-                encoding="utf-8",
+                '{"tar_name": "a.tar", "audio_id": "c.opus", "asr'
             )
+            path.write_text(torn, encoding="utf-8")
             self.assertEqual(
                 load_completed(path),
                 {("a.tar", "a.opus"), ("a.tar", "b.opus")},
             )
+            self.assertEqual(path.read_text(encoding="utf-8"), torn)
+            truncate_torn_tail(path)
             self.assertEqual(len(path.read_text(encoding="utf-8").splitlines()), 2)
             self.assertFalse(Path(str(path) + ".bad").exists())
             with path.open("a", encoding="utf-8") as handle:

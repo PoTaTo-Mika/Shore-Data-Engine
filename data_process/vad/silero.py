@@ -5,9 +5,10 @@ import threading
 from typing import cast
 
 import torch
+import torchaudio
 from silero_vad import get_speech_timestamps, load_silero_vad
 
-from data_process.codec import SAMPLE_RATE, decode_audio, slice_record
+from data_process.codec import SAMPLE_RATE, base_waveform, slice_record
 from data_process.data_reader import AudioRecord, Operator
 
 VAD_SAMPLE_RATE = 16000
@@ -71,8 +72,9 @@ def build_operator(params: dict[str, object]) -> Operator:
     lock = threading.Lock()
 
     def slice_audio(record: AudioRecord) -> list[AudioRecord]:
-        vad_input = torch.from_numpy(
-            decode_audio(record, VAD_SAMPLE_RATE, 1)[:, 0].copy()
+        waveform = base_waveform(record).mean(axis=1)
+        vad_input = torchaudio.functional.resample(
+            torch.from_numpy(waveform.copy()), SAMPLE_RATE, VAD_SAMPLE_RATE
         )
         with lock:
             timestamps = get_speech_timestamps(
@@ -84,7 +86,6 @@ def build_operator(params: dict[str, object]) -> Operator:
                 return_seconds=True,
             )
         speech = [(float(t["start"]), float(t["end"])) for t in timestamps]
-        waveform = decode_audio(record, SAMPLE_RATE, 1)[:, 0]
         segments = [
             (round(start * SAMPLE_RATE), min(len(waveform), round(end * SAMPLE_RATE)))
             for start, end in plan_segments(speech, **plan)

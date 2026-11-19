@@ -1,6 +1,7 @@
 """Config-driven serial pipeline; each stage launches its backend and sends requests."""
 
 import argparse
+import itertools
 import logging
 import os
 import re
@@ -18,8 +19,7 @@ from data_process.data_reader import (
     iter_tars,
     transform_tar,
 )
-from data_process.dispatch import BACKENDS, asr_transcriber
-from data_process.protocol import OperatorBackend
+from data_process.dispatch import PREPROCESS, asr_transcriber
 from data_process.state import (
     CURSOR_NAME,
     Annotation,
@@ -28,15 +28,17 @@ from data_process.state import (
     load_completed,
     load_cursors,
     pipeline_lock,
+    truncate_torn_tail,
 )
 from engine.backends import Config, Service, launch
 
 logger = logging.getLogger(__name__)
 
-Task = Literal["uvr", "slicer", "asr"]
+Task = Literal["preprocess", "asr"]
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "run.yaml"
 DEFAULT_STAGE_WORKERS = 4
+LOG_DIR_NAME = "_shore_logs"
 ENV_PATTERN = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)(?::-([^}]*))?\}")
 REQUIRED_KEYS = (
     "data_root",
@@ -46,7 +48,6 @@ REQUIRED_KEYS = (
     "models",
     "stages",
 )
-OPERATOR_BACKENDS = cast(dict[Task, OperatorBackend], BACKENDS)
 
 
 def expand_env(value: object) -> object:
@@ -60,13 +61,12 @@ def expand_env(value: object) -> object:
 
 
 def model_task(entry: Config) -> Task:
-    """ASR entries name a served `model`; operator entries name an `operator`."""
+    """ASR entries name a served `model`; preprocess entries list `operators`."""
     if "model" in entry:
         return "asr"
-    for task, backend in OPERATOR_BACKENDS.items():
-        if entry.get("operator") in backend.operators:
-            return task
-    raise ValueError(f"Unknown operator: {entry.get('operator')}")
+    if "operators" in entry:
+        return "preprocess"
+    raise ValueError(f"Model entry is neither asr nor preprocess: {entry}")
 
 
 def load_config(path: Path) -> Config:
@@ -137,7 +137,7 @@ def service_config(task: Task, service: Config, model: Config) -> Config:
             config["command"] = model["command"]
     else:
         base_url = cast(str, config["base_url"])
-        config["command"] = OPERATOR_BACKENDS[task].command(model, base_url)
+        config["command"] = PREPROCESS.command(model, base_url)
     return config
 
 
@@ -206,14 +206,17 @@ def run_pipeline(
         for stale in root.rglob(".*.rewrite"):
             stale.unlink(missing_ok=True)
         output.parent.mkdir(parents=True, exist_ok=True)
-        completed = load_completed(output)
         cursor_path = root / CURSOR_NAME
+        truncate_torn_tail(output)
+        truncate_torn_tail(cursor_path)
+        completed = load_completed(output)
         annotated = 0
         for stage in stages:
             name = cast(str, stage["name"])
             task = cast(Task, stage["task"])
             model = models[cast(str, stage["model"])]
             config = service_config(task, services[cast(str, stage["service"])], model)
+            log_path = root / LOG_DIR_NAME / f"{name}.log"
             tars = iter_tars(root)
             logger.info("Stage %s processing %d tars", name, len(tars))
             # The backend starts on first pending work and stops when the stage ends.
@@ -230,9 +233,9 @@ def run_pipeline(
                             continue
                         if operator is None:
                             service = stack.enter_context(
-                                launch(cast(str, stage["service"]), config)
+                                launch(cast(str, stage["service"]), config, log_path)
                             )
-                            operator = OPERATOR_BACKENDS[task].connect(
+                            operator = PREPROCESS.connect(
                                 service.client, service.base_url, service.retry
                             )
                         members = transform_tar(
@@ -251,10 +254,24 @@ def run_pipeline(
                         )
                     continue
 
+                # Annotating before earlier stages finish would key text to stale ids.
+                earlier = itertools.takewhile(
+                    lambda s: s["name"] != name, cast(list[Config], cfg["stages"])
+                )
+                required = {cast(str, s["name"]) for s in earlier if s["task"] != "asr"}
                 with output.open("a", encoding="utf-8") as handle:
                     for tar_path in tars:
                         if limit and annotated >= limit:
                             break
+                        missing = required - completed_stages(tar_path)
+                        if missing:
+                            logger.warning(
+                                "Stage %s skips %s; pending stages: %s",
+                                name,
+                                tar_path.name,
+                                ", ".join(sorted(missing)),
+                            )
+                            continue
                         for record in iter_audio(tar_path, extensions):
                             key = (tar_path.name, record.audio_id)
                             if key in completed:
@@ -263,7 +280,9 @@ def run_pipeline(
                                 break
                             if service is None:
                                 service = stack.enter_context(
-                                    launch(cast(str, stage["service"]), config)
+                                    launch(
+                                        cast(str, stage["service"]), config, log_path
+                                    )
                                 )
                                 transcribe = asr_transcriber(
                                     service.client,

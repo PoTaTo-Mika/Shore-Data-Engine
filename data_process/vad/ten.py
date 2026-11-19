@@ -4,9 +4,11 @@ import math
 from typing import cast
 
 import numpy as np
+import torch
+import torchaudio
 from ten_vad import TenVad
 
-from data_process.codec import SAMPLE_RATE, decode_audio, slice_record
+from data_process.codec import SAMPLE_RATE, base_waveform, slice_record
 from data_process.data_reader import AudioRecord, Operator
 
 VAD_SAMPLE_RATE = 16000
@@ -60,7 +62,10 @@ def build_operator(params: dict[str, object]) -> Operator:
     pad = round(cast(int, params.get("pad_ms", DEFAULT_PAD_MS)) / frame_ms)
 
     def slice_audio(record: AudioRecord) -> list[AudioRecord]:
-        vad_input = decode_audio(record, VAD_SAMPLE_RATE, 1)[:, 0]
+        waveform = base_waveform(record).mean(axis=1)
+        vad_input = torchaudio.functional.resample(
+            torch.from_numpy(waveform.copy()), SAMPLE_RATE, VAD_SAMPLE_RATE
+        ).numpy()
         pcm = (np.clip(vad_input, -1.0, 1.0) * 32767).astype(np.int16)
         frames = pcm[: len(pcm) // HOP_SIZE * HOP_SIZE].reshape(-1, HOP_SIZE)
         # The detector is stateful, so each member gets a fresh instance.
@@ -70,7 +75,6 @@ def build_operator(params: dict[str, object]) -> Operator:
             voiced, min_speech=min_speech, min_silence=min_silence, pad=pad
         )
 
-        waveform = decode_audio(record, SAMPLE_RATE, 1)[:, 0]
         samples_per_frame = HOP_SIZE * SAMPLE_RATE / VAD_SAMPLE_RATE
         segments = [
             (

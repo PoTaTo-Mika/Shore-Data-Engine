@@ -3,24 +3,18 @@ output_name: annotations.jsonl
 audio_extensions: [.opus, .wav, .mp3, .flac, .m4a, .ogg, .aac]
 engine_path: engine/sglang-omni
 
-# Concurrent requests per tar sent to the uvr / slicer backends.
+# Concurrent requests per tar sent to the preprocess backend.
 stage_workers: ${SHORE_STAGE_WORKERS:-4}
 
 # Every stage runs against a backend service, started for the stage and stopped after it.
-# uvr / slicer backends are the stage dispatch servers; the ASR model supplies its command.
+# The preprocess backend is the stage dispatch server; the ASR model supplies its command.
 # Drop an ASR model's command to attach to an already running server.
 services:
-  uvr:
-    base_url: ${UVR_BASE_URL:-http://127.0.0.1:8001}
+  preprocess:
+    base_url: ${PREPROCESS_BASE_URL:-http://127.0.0.1:8001}
     health_path: /health
     startup_timeout_s: 600
     timeout_s: 600
-    retry: {max_attempts: 3, backoff_s: 1.0, status_codes: [502, 503, 504]}
-  vad:
-    base_url: ${VAD_BASE_URL:-http://127.0.0.1:8002}
-    health_path: /health
-    startup_timeout_s: 300
-    timeout_s: 300
     retry: {max_attempts: 3, backoff_s: 1.0, status_codes: [502, 503, 504]}
   omni:
     base_url: ${OMNI_BASE_URL:-http://127.0.0.1:8000}
@@ -34,26 +28,31 @@ services:
       status_codes: [429, 500, 502, 503, 504]
 
 # Pick a model per stage with stages[].model or `--model <key>` (repeatable).
+# A preprocess model is an operator chain: vocal isolation then slicing run in one
+# tar rewrite. MDX-Net ONNX weights download from repo_id when model_path is missing;
+# n_fft / dim_f / dim_t / compensate are per-checkpoint (these match Kim_Vocal_2).
 models:
-  # uvr: served by data_process.dispatch at /v1/audio/separations.
-  demucs: {operator: demucs, params: {model: htdemucs}}
-  # MDX-Net ONNX weights are downloaded from repo_id when model_path is missing.
-  # n_fft / dim_f / dim_t / compensate are per-checkpoint; these match Kim_Vocal_2.
-  mdx_net:
-    operator: mdx_net
-    params:
-      model_path: checkpoints/Kim_Vocal_2.onnx
-      repo_id: seanghay/uvr_models
-      stem: vocals
-      n_fft: 7680
-      dim_f: 3072
-      dim_t: 256
-      compensate: 1.009
-
-  # slicer: served by data_process.dispatch at /v1/audio/segments.
-  rms_vad: {operator: rms_vad, params: {threshold: -30.0, min_length: 10000}}
-  silero_vad: {operator: silero_vad, params: {threshold: 0.6, min_silence_ms: 500, target_s: 15.0, max_s: 20.0}}
-  ten_vad: {operator: ten_vad, params: {threshold: 0.5, min_speech_ms: 300, min_silence_ms: 200}}
+  # preprocess: served by data_process.dispatch at /v1/audio/process.
+  demucs_rms:
+    operators:
+      - {operator: demucs, params: {model: htdemucs}}
+      - {operator: rms_vad, params: {threshold: -30.0, min_length: 10000}}
+  demucs_silero:
+    operators:
+      - {operator: demucs, params: {model: htdemucs}}
+      - {operator: silero_vad, params: {threshold: 0.6, min_silence_ms: 500, target_s: 15.0, max_s: 20.0}}
+  mdx_ten:
+    operators:
+      - operator: mdx_net
+        params:
+          model_path: checkpoints/Kim_Vocal_2.onnx
+          repo_id: seanghay/uvr_models
+          stem: vocals
+          n_fft: 7680
+          dim_f: 3072
+          dim_t: 256
+          compensate: 1.009
+      - {operator: ten_vad, params: {threshold: 0.5, min_speech_ms: 300, min_silence_ms: 200}}
 
   # asr: plain multipart /v1/audio/transcriptions with response_format=json.
   # Checkpoints present in checkpoints/ are referenced by local path; the rest
@@ -92,8 +91,8 @@ models:
     params: {response_format: json}
     command: [sgl-omni, serve, --model-path, checkpoints/MOSS-Transcribe-Diarize, --model-name, OpenMOSS-Team/MOSS-Transcribe-Diarize, --asr.engine.max_running_requests, "4", --asr.engine.cuda_graph_max_bs, "4", --mem-fraction-static, "0.80", --port, "8000"]
 
-# stage1 UVR, stage2 Slicer, stage3 ASR; each stage covers all tars before the next.
+# stage1 preprocess (clean + slice in one rewrite), stage2 ASR; each stage covers
+# all tars before the next.
 stages:
-  - {name: stage1, task: uvr, service: uvr, model: demucs}
-  - {name: stage2, task: slicer, service: vad, model: rms_vad}
-  - {name: stage3, task: asr, service: omni, model: qwen3_asr}
+  - {name: stage1, task: preprocess, service: preprocess, model: demucs_rms}
+  - {name: stage2, task: asr, service: omni, model: qwen3_asr}

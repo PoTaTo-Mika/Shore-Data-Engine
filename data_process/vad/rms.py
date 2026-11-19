@@ -4,7 +4,7 @@ from typing import cast
 
 import numpy as np
 
-from data_process.codec import SAMPLE_RATE, decode_audio, slice_record
+from data_process.codec import SAMPLE_RATE, base_waveform, slice_record
 from data_process.data_reader import AudioRecord, Operator
 
 DEFAULT_THRESHOLD_DB = -30.0
@@ -157,7 +157,7 @@ def build_operator(params: dict[str, object]) -> Operator:
     )
 
     def slice_audio(record: AudioRecord) -> list[AudioRecord]:
-        waveform = decode_audio(record, SAMPLE_RATE, 1)[:, 0]
+        waveform = base_waveform(record).mean(axis=1)
         return slice_record(record, waveform, SAMPLE_RATE, slicer.slice(waveform))
 
     return slice_audio
