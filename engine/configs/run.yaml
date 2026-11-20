@@ -1,7 +1,6 @@
 data_root: data
-output_name: annotations.jsonl
 audio_extensions: [.opus, .wav, .mp3, .flac, .m4a, .ogg, .aac]
-engine_path: engine/sglang-omni
+engine_path: third-party/sglang-omni
 
 # Concurrent requests per tar sent to the preprocess backend.
 stage_workers: ${SHORE_STAGE_WORKERS:-4}

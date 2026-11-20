@@ -26,11 +26,12 @@ from data_process.protocol import post
 from data_process.state import (
     CURSOR_NAME,
     Annotation,
+    annotation_path,
     append_annotation,
     append_record,
     iter_records,
-    load_completed,
     load_cursors,
+    load_done_names,
     pipeline_lock,
 )
 from engine.backends import Config, Service, launch
@@ -96,7 +97,6 @@ def health_server(port: int) -> str:
 def pipeline_config(root: Path) -> Config:
     return {
         "data_root": str(root),
-        "output_name": "annotations.jsonl",
         "audio_extensions": [".opus"],
         "stage_workers": 3,
         "services": {
@@ -194,7 +194,6 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual([s["name"] for s in stages], ["stage1", "stage2"])
         self.assertEqual([s["task"] for s in stages], ["preprocess", "asr"])
         self.assertEqual([s["service"] for s in stages], ["preprocess", "omni"])
-        self.assertEqual(cfg["output_name"], "annotations.jsonl")
 
     def test_repository_config_chains_clean_then_slice(self) -> None:
         models = cast(dict[str, Config], load_config(REPO_CONFIG)["models"])
@@ -257,7 +256,7 @@ class ConfigTests(unittest.TestCase):
                 load_config(path)
 
     def test_engine_revision_tracks_submodule(self) -> None:
-        path = Path(__file__).resolve().parents[1] / "engine" / "sglang-omni"
+        path = Path(__file__).resolve().parents[1] / "third-party" / "sglang-omni"
         revision = engine_revision(path)
         if (path / ".git").exists():
             self.assertEqual(len(cast(str, revision)), 40)
@@ -512,13 +511,13 @@ class PipelineTests(unittest.TestCase):
             events: list[str] = []
             self.run_with_backends(cfg, echo(events))
 
-            output = root / "annotations.jsonl"
+            output = root / "en_000.jsonl"
             records = [
                 json.loads(line)
                 for line in output.read_text(encoding="utf-8").splitlines()
             ]
             self.assertEqual(
-                {r["audio_id"] for r in records}, {"album/a.opus", "album/b.opus"}
+                {r["name"] for r in records}, {"album/a.opus", "album/b.opus"}
             )
             self.assertTrue(all(r["asr_text"] == "hello" for r in records))
             self.assertEqual(list(root.glob(".*.rewrite")), [])
@@ -543,7 +542,7 @@ class PipelineTests(unittest.TestCase):
             )
             self.assertEqual([name for name, _ in started], ["omni", "stop:omni"])
             lines = (
-                (root / "annotations.jsonl").read_text(encoding="utf-8").splitlines()
+                (root / "en_000.jsonl").read_text(encoding="utf-8").splitlines()
             )
             self.assertEqual(len(lines), 1)
 
@@ -554,7 +553,7 @@ class PipelineTests(unittest.TestCase):
             with patch("engine.run.launch") as start:
                 run_pipeline(pipeline_config(root), None, 0, True)
             start.assert_not_called()
-            self.assertFalse((root / "annotations.jsonl").exists())
+            self.assertFalse((root / "en_000.jsonl").exists())
 
     def test_overrides_select_backend_commands(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -627,16 +626,15 @@ class PipelineTests(unittest.TestCase):
                     pipeline_config(root), echo(events), only="stage2"
                 )
             self.assertTrue(any("en_000.tar" in line for line in logs.output))
-            self.assertEqual(
-                load_completed(root / "annotations.jsonl"), {("en_001.tar", "b.opus")}
-            )
+            self.assertFalse((root / "en_000.jsonl").exists())
+            self.assertEqual(load_done_names(root / "en_001.jsonl"), {"b.opus"})
 
     def test_asr_progress_is_streamed_to_jsonl(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             make_audio_tar(root / "en_000.tar", ("a.opus", "b.opus"), ("stage1",))
             cfg = pipeline_config(root)
-            output = root / "annotations.jsonl"
+            output = root / "en_000.jsonl"
             transcribed: list[str] = []
 
             def paused(name: str, request: httpx.Request) -> httpx.Response:
@@ -648,19 +646,17 @@ class PipelineTests(unittest.TestCase):
             with self.assertRaises(httpx.HTTPStatusError):
                 self.run_with_backends(cfg, paused, only="stage2")
             lines = output.read_text(encoding="utf-8").splitlines()
-            self.assertEqual(
-                [json.loads(line)["audio_id"] for line in lines], ["a.opus"]
-            )
+            self.assertEqual([json.loads(line)["name"] for line in lines], ["a.opus"])
 
             events: list[str] = []
             self.run_with_backends(cfg, echo(events), only="stage2")
-            self.assertEqual(len(load_completed(output)), 2)
+            self.assertEqual(len(load_done_names(output)), 2)
             self.assertEqual(events, ["omni:asr"])
 
     def test_status_streams_cursors_and_annotations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            output = root / "annotations.jsonl"
+            make_audio_tar(root / "en.tar", ("a.opus",))
             with (root / CURSOR_NAME).open("a", encoding="utf-8") as handle:
                 append_record(
                     handle,
@@ -671,13 +667,10 @@ class PipelineTests(unittest.TestCase):
                         "written": 2,
                     },
                 )
-            with output.open("a", encoding="utf-8") as handle:
-                append_annotation(
-                    handle,
-                    Annotation(tar_name="en.tar", audio_id="a.opus", asr_text="hi"),
-                )
+            with annotation_path(root / "en.tar").open("a", encoding="utf-8") as handle:
+                append_annotation(handle, Annotation(name="a.opus", asr_text="hi"))
             with self.assertLogs("engine.run", level="INFO") as logs:
-                show_status(root, output)
+                show_status(root)
             self.assertTrue(any("member=2 written=2" in line for line in logs.output))
             self.assertTrue(any("Annotations: 1" in line for line in logs.output))
             self.assertTrue(any("('en.tar', 'a.opus')" in line for line in logs.output))
@@ -685,14 +678,15 @@ class PipelineTests(unittest.TestCase):
     def test_status_leaves_in_flight_append_intact(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            output = root / "annotations.jsonl"
+            make_audio_tar(root / "en.tar", ("a.opus",))
+            output = annotation_path(root / "en.tar")
             content = (
-                '{"tar_name": "en.tar", "audio_id": "a.opus", "asr_text": "hi"}\n'
-                '{"tar_name": "en.tar", "audio_id": "b.op'
+                '{"name": "a.opus", "asr_text": "hi"}\n'
+                '{"name": "b.op'
             )
             output.write_text(content, encoding="utf-8")
             with self.assertLogs("engine.run", level="INFO") as logs:
-                show_status(root, output)
+                show_status(root)
             self.assertTrue(any("Annotations: 1" in line for line in logs.output))
             self.assertEqual(output.read_text(encoding="utf-8"), content)
 

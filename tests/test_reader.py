@@ -20,8 +20,8 @@ from data_process.state import (
     Annotation,
     append_annotation,
     iter_records,
-    load_completed,
     load_cursors,
+    load_done_names,
     truncate_torn_tail,
 )
 
@@ -138,27 +138,16 @@ class TarReaderTests(unittest.TestCase):
 class AnnotationTests(unittest.TestCase):
     def test_jsonl_schema_and_resume(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "annotations.jsonl"
-            self.assertEqual(load_completed(path), set())
+            path = Path(tmp) / "en.jsonl"
+            self.assertEqual(load_done_names(path), set())
             with path.open("a", encoding="utf-8") as handle:
-                append_annotation(
-                    handle,
-                    Annotation(tar_name="en.tar", audio_id="a.opus", asr_text="你好"),
-                )
-                append_annotation(
-                    handle,
-                    Annotation(tar_name="en.tar", audio_id="b.opus", asr_text="world"),
-                )
+                append_annotation(handle, Annotation(name="a.opus", asr_text="你好"))
+                append_annotation(handle, Annotation(name="b.opus", asr_text="world"))
             lines = path.read_text(encoding="utf-8").splitlines()
             self.assertEqual(len(lines), 2)
-            self.assertEqual(
-                set(json.loads(lines[0])), {"tar_name", "audio_id", "asr_text"}
-            )
+            self.assertEqual(set(json.loads(lines[0])), {"name", "asr_text"})
             self.assertEqual(json.loads(lines[0])["asr_text"], "你好")
-            self.assertEqual(
-                load_completed(path),
-                {("en.tar", "a.opus"), ("en.tar", "b.opus")},
-            )
+            self.assertEqual(load_done_names(path), {"a.opus", "b.opus"})
 
 
 class ParallelTarTests(unittest.TestCase):
@@ -273,31 +262,20 @@ class ParallelTarTests(unittest.TestCase):
 class ResumeTests(unittest.TestCase):
     def test_torn_jsonl_tail_is_truncated_without_extra_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "annotations.jsonl"
+            path = Path(tmp) / "en.jsonl"
             torn = (
-                '{"tar_name": "a.tar", "audio_id": "a.opus", "asr_text": "hi"}\n'
-                '{"tar_name": "a.tar", "audio_id": "b.opus", "asr_text": "yo"}\n'
-                '{"tar_name": "a.tar", "audio_id": "c.opus", "asr'
+                '{"name": "a.opus", "asr_text": "hi"}\n'
+                '{"name": "b.opus", "asr_text": "yo"}\n'
+                '{"name": "c.opus", "asr'
             )
             path.write_text(torn, encoding="utf-8")
-            self.assertEqual(
-                load_completed(path),
-                {("a.tar", "a.opus"), ("a.tar", "b.opus")},
-            )
+            self.assertEqual(load_done_names(path), {"a.opus", "b.opus"})
             self.assertEqual(path.read_text(encoding="utf-8"), torn)
             truncate_torn_tail(path)
             self.assertEqual(len(path.read_text(encoding="utf-8").splitlines()), 2)
             self.assertFalse(Path(str(path) + ".bad").exists())
             with path.open("a", encoding="utf-8") as handle:
-                append_annotation(
-                    handle,
-                    Annotation(tar_name="a.tar", audio_id="c.opus", asr_text="ok"),
-                )
+                append_annotation(handle, Annotation(name="c.opus", asr_text="ok"))
             self.assertEqual(
-                load_completed(path),
-                {
-                    ("a.tar", "a.opus"),
-                    ("a.tar", "b.opus"),
-                    ("a.tar", "c.opus"),
-                },
+                load_done_names(path), {"a.opus", "b.opus", "c.opus"}
             )

@@ -70,17 +70,18 @@ def append_record(handle: TextIO, record: Mapping[str, object]) -> None:
 
 @dataclass(kw_only=True)
 class Annotation:
-    tar_name: str
-    audio_id: str
+    name: str
     asr_text: str
 
 
-def load_completed(path: Path) -> set[tuple[str, str]]:
-    """Stream (tar name, audio id) pairs already written, for resuming a run."""
-    return {
-        (cast(str, record["tar_name"]), cast(str, record["audio_id"]))
-        for record in iter_records(path)
-    }
+def annotation_path(tar_path: Path) -> Path:
+    """The per-tar jsonl sitting beside the tar with a matching stem."""
+    return tar_path.with_suffix(".jsonl")
+
+
+def load_done_names(path: Path) -> set[str]:
+    """Stream member names already annotated in a tar's jsonl, for resuming a run."""
+    return {cast(str, record["name"]) for record in iter_records(path)}
 
 
 def append_annotation(handle: TextIO, annotation: Annotation) -> None:

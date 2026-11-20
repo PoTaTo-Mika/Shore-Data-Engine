@@ -83,4 +83,4 @@ namespaces = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-norecursedirs = ["engine/sglang-omni", "third-party", "build"]
+norecursedirs = ["third-party", "build"]

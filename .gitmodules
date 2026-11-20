@@ -1,8 +1,8 @@
-[submodule "engine/sglang-omni"]
-	path = engine/sglang-omni
+[submodule "third-party/sglang-omni"]
+	path = third-party/sglang-omni
 	url = https://github.com/sgl-project/sglang-omni.git
 	branch = main
-[submodule "offline_deps/demucs"]
+[submodule "third-party/demucs"]
 	path = third-party/demucs
 	url = https://github.com/facebookresearch/demucs.git
 	branch = main

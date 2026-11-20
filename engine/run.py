@@ -23,10 +23,11 @@ from data_process.dispatch import PREPROCESS, asr_transcriber
 from data_process.state import (
     CURSOR_NAME,
     Annotation,
+    annotation_path,
     append_annotation,
     iter_records,
-    load_completed,
     load_cursors,
+    load_done_names,
     pipeline_lock,
     truncate_torn_tail,
 )
@@ -42,7 +43,6 @@ LOG_DIR_NAME = "_shore_logs"
 ENV_PATTERN = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)(?::-([^}]*))?\}")
 REQUIRED_KEYS = (
     "data_root",
-    "output_name",
     "audio_extensions",
     "services",
     "models",
@@ -104,7 +104,7 @@ def engine_revision(path: Path) -> str | None:
     return result.stdout.strip()
 
 
-def show_status(root: Path, output: Path) -> None:
+def show_status(root: Path) -> None:
     cursors = load_cursors(root / CURSOR_NAME)
     for cursor in cursors.values():
         logger.info(
@@ -116,17 +116,20 @@ def show_status(root: Path, output: Path) -> None:
         )
     if not cursors:
         logger.info("No stage cursors in progress")
-    lines = 0
-    tars: set[str] = set()
+    annotated_tars = 0
+    annotations = 0
     last: tuple[str, str] | None = None
-    for record in iter_records(output):
-        tar_name = cast(str, record["tar_name"])
-        tars.add(tar_name)
-        last = (tar_name, cast(str, record["audio_id"]))
-        lines += 1
-    logger.info("ASR tars annotated: %d", len(tars))
+    for tar_path in iter_tars(root):
+        names = 0
+        for record in iter_records(annotation_path(tar_path)):
+            last = (tar_path.name, cast(str, record["name"]))
+            annotations += 1
+            names += 1
+        if names:
+            annotated_tars += 1
+    logger.info("ASR tars annotated: %d", annotated_tars)
     logger.info("Last annotation: %s", last)
-    logger.info("Annotations: %d", lines)
+    logger.info("Annotations: %d", annotations)
 
 
 def service_config(task: Task, service: Config, model: Config) -> Config:
@@ -162,7 +165,6 @@ def run_pipeline(
     extensions = set(cast(list[str], cfg["audio_extensions"]))
     services = cast(dict[str, Config], cfg["services"])
     models = cast(dict[str, Config], cfg["models"])
-    output = root / cast(str, cfg["output_name"])
     workers = int(cast(str | int, cfg.get("stage_workers", DEFAULT_STAGE_WORKERS)))
     if workers < 1:
         raise ValueError(f"stage_workers must be >= 1, got {workers}")
@@ -205,11 +207,8 @@ def run_pipeline(
         # A hard kill can leave a transient tar target behind; no staging data is kept.
         for stale in root.rglob(".*.rewrite"):
             stale.unlink(missing_ok=True)
-        output.parent.mkdir(parents=True, exist_ok=True)
         cursor_path = root / CURSOR_NAME
-        truncate_torn_tail(output)
         truncate_torn_tail(cursor_path)
-        completed = load_completed(output)
         annotated = 0
         for stage in stages:
             name = cast(str, stage["name"])
@@ -259,22 +258,25 @@ def run_pipeline(
                     lambda s: s["name"] != name, cast(list[Config], cfg["stages"])
                 )
                 required = {cast(str, s["name"]) for s in earlier if s["task"] != "asr"}
-                with output.open("a", encoding="utf-8") as handle:
-                    for tar_path in tars:
-                        if limit and annotated >= limit:
-                            break
-                        missing = required - completed_stages(tar_path)
-                        if missing:
-                            logger.warning(
-                                "Stage %s skips %s; pending stages: %s",
-                                name,
-                                tar_path.name,
-                                ", ".join(sorted(missing)),
-                            )
-                            continue
+                for tar_path in tars:
+                    if limit and annotated >= limit:
+                        break
+                    missing = required - completed_stages(tar_path)
+                    if missing:
+                        logger.warning(
+                            "Stage %s skips %s; pending stages: %s",
+                            name,
+                            tar_path.name,
+                            ", ".join(sorted(missing)),
+                        )
+                        continue
+                    # Each tar's annotations live in a sibling jsonl of the same stem.
+                    jsonl = annotation_path(tar_path)
+                    truncate_torn_tail(jsonl)
+                    done = load_done_names(jsonl)
+                    with jsonl.open("a", encoding="utf-8") as handle:
                         for record in iter_audio(tar_path, extensions):
-                            key = (tar_path.name, record.audio_id)
-                            if key in completed:
+                            if record.audio_id in done:
                                 continue
                             if limit and annotated >= limit:
                                 break
@@ -293,14 +295,13 @@ def run_pipeline(
                             append_annotation(
                                 handle,
                                 Annotation(
-                                    tar_name=tar_path.name,
-                                    audio_id=record.audio_id,
+                                    name=record.audio_id,
                                     asr_text=transcribe(record),
                                 ),
                             )
-                            completed.add(key)
+                            done.add(record.audio_id)
                             annotated += 1
-                        logger.info("Stage %s annotated %s", name, tar_path.name)
+                    logger.info("Stage %s annotated %s", name, tar_path.name)
 
 
 def main() -> None:
@@ -327,8 +328,7 @@ def main() -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     cfg = load_config(args.config)
     if args.status:
-        root = Path(cast(str, cfg["data_root"]))
-        show_status(root, root / cast(str, cfg["output_name"]))
+        show_status(Path(cast(str, cfg["data_root"])))
         return
     run_pipeline(cfg, args.stage, args.limit, args.dry_run, args.model)
 
